@@ -1,8 +1,8 @@
-use std::{collections::HashMap, fs::read, io::Read, sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use anyhow::Result;
 use futures_util::{stream::{SplitSink, SplitStream}, SinkExt, StreamExt};
-use tokio::{net::TcpStream, select, sync::Mutex, task::JoinHandle, time::sleep};
+use tokio::{net::TcpStream, sync::{broadcast, Mutex}, task::JoinHandle, time::sleep};
 use tokio_tungstenite::{connect_async, tungstenite::{client::IntoClientRequest, Message, Utf8Bytes}, MaybeTlsStream, WebSocketStream};
 use tokio_util::sync::CancellationToken;
 
@@ -24,7 +24,6 @@ struct Connection {
 impl Connection {
     pub async fn write(&mut self, msg: Message) {
         let write_clone = Arc::clone(&self.write.as_ref().unwrap());
-        println!("hit write");
         let mut write_lock = write_clone.lock().await;
         let _ = write_lock.send(msg).await;
     }
@@ -96,7 +95,7 @@ struct Config {
 }
 
 struct WSManager {
-    conn: HashMap<String, Mutex<Connection>>
+    conn: HashMap<String, Arc<Mutex<Connection>>>
 }
 
 impl WSManager {
@@ -114,40 +113,67 @@ impl WSManager {
             hooks,
         };
 
-        self.conn.insert(name.to_string(), Mutex::new(conn));
+        self.conn.insert(name.to_string(), Arc::new(Mutex::new(conn)));
     }
 
-    pub async fn start(&self) -> Vec<(JoinHandle<()>, CancellationToken)> {
-        let mut res = Vec::new();
+    pub async fn start(&self, tx: broadcast::Sender<(String, u8)>) -> HashMap<String, JoinHandle<()>> {
+        let mut res = HashMap::with_capacity(self.conn.len());
         
-        for (_name, conn ) in &self.conn {
-            let cancel_token = CancellationToken::new();
-            let mut locked_conn = conn.lock().await;
-            let (read_handle, ping_handle) = locked_conn.start_loop(cancel_token.clone()).await;
-            
-            let abort_read = read_handle.abort_handle();
-            let abort_ping = ping_handle.abort_handle();
-
-            let cancel_token_clone = cancel_token.clone();
+        for (name, conn ) in &self.conn {
+            let conn_clone = Arc::clone(conn);
+            let name_clone = name.clone();
+            let mut rx_clone = tx.subscribe();
             let manager_handle = tokio::spawn(async move {
-                tokio::select! {
-                    _ = cancel_token_clone.cancelled() => {
-                        println!("Canncellled");
-                        abort_read.abort();
-                        abort_ping.abort();
-                    },
-                    _ = read_handle => {
-                        println!("Read handle");
-                        abort_ping.abort();
+                loop {
+                    println!("Connected");
+                    let cancel_token = CancellationToken::new();
+                    
+                    let mut read_handle: Option<JoinHandle<()>> = None;
+                    let mut ping_handle: Option<JoinHandle<()>> = None;
+
+                    {
+                        let mut locked_conn = conn_clone.lock().await;
+                        let (read_handle_tmp, ping_handle_tmp) = locked_conn.start_loop(cancel_token.clone()).await;
+                        read_handle = Some(read_handle_tmp);
+                        ping_handle = Some(ping_handle_tmp);
                     }
-                    _ = ping_handle => {
-                        println!("Read handle");
-                        abort_read.abort();
+                    
+                    let read_handle_actual = std::mem::take(&mut read_handle).unwrap();
+                    let ping_handle_actual = std::mem::take(&mut ping_handle).unwrap();
+
+                    let abort_read = read_handle_actual.abort_handle();
+                    let abort_ping = ping_handle_actual.abort_handle();
+
+                    let cancel_token_select = cancel_token.clone();
+                    tokio::select! {
+                        maybe_msg = rx_clone.recv() => {
+                            if let Ok(msg) = maybe_msg {
+                                if msg.0 == name_clone && msg.1 == 0 {
+                                    println!("Received abort message");
+                                    abort_ping.abort();
+                                    abort_read.abort();
+                                }
+                            }
+                        },
+                        _ = cancel_token_select.cancelled() => {
+                            println!("Canncellled");
+                            abort_read.abort();
+                            abort_ping.abort();
+                        },
+                        _ = read_handle_actual => {
+                            println!("Read handle");
+                            abort_read.abort();
+                            abort_ping.abort();
+                        }
+                        _ = ping_handle_actual => {
+                            println!("Ping handle");
+                            abort_read.abort();
+                            abort_ping.abort();
+                        }
                     }
                 }
             });
-            
-            res.push((manager_handle, cancel_token));
+            res.insert(name.clone(), manager_handle);
         }
         res
     }
@@ -177,8 +203,13 @@ async fn main() {
     let mut mgr = WSManager::new();
     mgr.new_conn("hl", hl_config, hooks);
     
-    let handles = mgr.start().await;
+    let (tx, rx ) = broadcast::channel(64);
+    let _handles = mgr.start(tx.clone()).await;
     
-    mgr.write("hl", Message::Text("{ \"method\": \"subscribe\", \"subscription\": { \"type\": \"l2Book\", \"coin\": \"SOL\" } }".into())).await;
-    loop {}
+    loop {
+        sleep(Duration::from_secs(5)).await;
+        mgr.write("hl", Message::Text("{ \"method\": \"subscribe\", \"subscription\": { \"type\": \"l2Book\", \"coin\": \"SOL\" } }".into())).await;
+        sleep(Duration::from_secs(10)).await;
+        let _ = tx.send(("hl".to_string(), 0));
+    }
 }
