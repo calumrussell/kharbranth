@@ -1,9 +1,11 @@
 use std::{collections::HashMap, sync::Arc, time::{Duration, SystemTime}};
 
-use futures_util::{stream::{SplitSink, SplitStream}, SinkExt, StreamExt};
-use tokio::{net::TcpStream, sync::{broadcast, Mutex}, task::JoinHandle, time::sleep};
+use anyhow::anyhow;
+use futures_util::{lock, stream::{SplitSink, SplitStream}, SinkExt, StreamExt};
+use log::{debug, info, error};
+use tokio::{net::TcpStream, sync::{broadcast, Mutex, RwLock}, task::JoinHandle, time::sleep};
 use tokio_tungstenite::{connect_async, tungstenite::{client::IntoClientRequest, protocol::{frame::Frame, CloseFrame}, Message, Utf8Bytes}, MaybeTlsStream, WebSocketStream};
-use tokio_util::{bytes::Bytes, sync::CancellationToken};
+use tokio_util::bytes::Bytes;
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type WsSink = SplitSink<WsStream, Message>;
@@ -31,6 +33,27 @@ impl ReadHooks {
     }
 }
 
+#[derive(Debug)]
+pub enum ConnectionError {
+    PingFailed,
+    CloseFrameReceived,
+    PongReceiveTimeout,
+}
+
+impl std::fmt::Display for ConnectionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConnectionError::PingFailed => write!(f, "Ping Failed"),
+            ConnectionError::CloseFrameReceived => write!(f, "Close Frame Received"),
+            ConnectionError::PongReceiveTimeout => write!(f, "Timed out waiting for Pong"),
+        }
+    }
+}
+
+impl std::error::Error for ConnectionError {}
+
+type ConnectionResult = Result<(), anyhow::Error>;
+
 pub struct Connection {
     pub config: Config,
     pub read: Option<Arc<Mutex<WsSource>>>,
@@ -45,7 +68,7 @@ impl Connection {
         let _ = write_lock.send(msg).await;
     }
     
-    async fn ping_loop(&mut self) -> JoinHandle<()> {
+    async fn ping_loop(&mut self) -> JoinHandle<ConnectionResult> {
         let write_clone = Arc::clone(&self.write.as_ref().unwrap());
         let ping_message_clone = self.config.ping_message.clone().into_bytes();
         let ping_duration_clone = self.config.ping_duration.clone();
@@ -54,16 +77,17 @@ impl Connection {
             loop {
                 {
                     let mut write_lock = write_clone.lock().await;
-                    let _ = write_lock.send(Message::Ping(ping_message_clone.clone().into())).await;
+                    if let Err(e) = write_lock.send(Message::Ping(ping_message_clone.clone().into())).await {
+                        return Err(anyhow!(ConnectionError::PingFailed))
+                    }
                 }
                 sleep(Duration::from_secs(ping_duration_clone.into())).await;
             }
         })
     }
 
-    async fn read_loop(&mut self, cancel_token: CancellationToken) -> JoinHandle<()> {
+    async fn read_loop(&mut self) -> JoinHandle<ConnectionResult> {
         let read_clone = Arc::clone(&self.read.as_ref().unwrap());
-        let cancel_token_clone = cancel_token.clone();
         let ping_duration_clone = self.config.ping_duration.clone();
         let mut last_pong = SystemTime::now();
 
@@ -75,8 +99,8 @@ impl Connection {
         let on_frame_clone = Arc::clone(&self.hooks.on_frame);
         tokio::spawn(async move {
             loop {
-                if SystemTime::now() > last_pong.checked_add(Duration::from_secs(ping_duration_clone)).unwrap() {
-                    cancel_token_clone.cancel();
+                if SystemTime::now() > last_pong.checked_add(Duration::from_secs(ping_duration_clone + 5)).unwrap() {
+                    return Err(anyhow!(ConnectionError::PingFailed));
                 }
 
                 let mut read_lock = read_clone.lock().await;
@@ -108,7 +132,7 @@ impl Connection {
                                 if let Some (on_close_func) = on_close_clone.as_ref() {
                                     on_close_func(maybe_frame);
                                 }
-                                cancel_token_clone.cancel();
+                                return Err(anyhow!(ConnectionError::CloseFrameReceived));
                             },
                             Message::Frame(frame) => {
                                 if let Some(on_frame_func) = on_frame_clone.as_ref() {
@@ -123,15 +147,16 @@ impl Connection {
         })
     }
 
-    pub async fn start_loop(&mut self, cancel_token: CancellationToken) -> (JoinHandle<()>, JoinHandle<()>) {
+    pub async fn start_loop(&mut self) -> (JoinHandle<ConnectionResult>, JoinHandle<ConnectionResult>) {
         let request = self.config.url.clone().into_client_request().unwrap();
         let (conn, response) = connect_async(request).await.unwrap();
+        debug!("Websocket connection handshake response: {:?}", response);
         let (write, read) = conn.split();
         
         self.read = Some(Arc::new(Mutex::new(read)));
         self.write = Some(Arc::new(Mutex::new(write)));
      
-        let read_loop = self.read_loop(cancel_token.clone()).await;
+        let read_loop = self.read_loop().await;
         let ping_loop = self.ping_loop().await;
         
         (read_loop, ping_loop)
@@ -151,10 +176,13 @@ pub struct Config {
     pub url: String,
     pub ping_duration: u64,
     pub ping_message: String,
+    pub reconnect_timeout: u64,
 }
 
+pub type BroadcastMesasge = (String, u8);
+
 pub struct WSManager {
-    conn: HashMap<String, Arc<Mutex<Connection>>>
+    conn: HashMap<String, Arc<RwLock<Connection>>>,
 }
 
 impl WSManager {
@@ -172,10 +200,10 @@ impl WSManager {
             hooks,
         };
 
-        self.conn.insert(name.to_string(), Arc::new(Mutex::new(conn)));
+        self.conn.insert(name.to_string(), Arc::new(RwLock::new(conn)));
     }
 
-    pub async fn start(&self, tx: broadcast::Sender<(String, u8)>) -> HashMap<String, JoinHandle<()>> {
+    pub async fn start(&self, tx: broadcast::Sender<BroadcastMesasge>) -> HashMap<String, JoinHandle<()>> {
         let mut res = HashMap::with_capacity(self.conn.len());
         
         for (name, conn ) in &self.conn {
@@ -184,51 +212,51 @@ impl WSManager {
             let mut rx_clone = tx.subscribe();
             let manager_handle = tokio::spawn(async move {
                 loop {
-                    println!("Connected");
-                    let cancel_token = CancellationToken::new();
                     
-                    let mut read_handle: Option<JoinHandle<()>> = None;
-                    let mut ping_handle: Option<JoinHandle<()>> = None;
+                    let (read_handle, ping_handle) = {
+                        let mut locked_conn = conn_clone.write().await;
+                        info!("Connected to {}", locked_conn.config.url);
+                        locked_conn.start_loop().await
+                    };
+                   
+                    let abort_read = read_handle.abort_handle();
+                    let abort_ping = ping_handle.abort_handle();
 
-                    {
-                        let mut locked_conn = conn_clone.lock().await;
-                        let (read_handle_tmp, ping_handle_tmp) = locked_conn.start_loop(cancel_token.clone()).await;
-                        read_handle = Some(read_handle_tmp);
-                        ping_handle = Some(ping_handle_tmp);
-                    }
-                    
-                    let read_handle_actual = std::mem::take(&mut read_handle).unwrap();
-                    let ping_handle_actual = std::mem::take(&mut ping_handle).unwrap();
-
-                    let abort_read = read_handle_actual.abort_handle();
-                    let abort_ping = ping_handle_actual.abort_handle();
-
-                    let cancel_token_select = cancel_token.clone();
                     tokio::select! {
                         maybe_msg = rx_clone.recv() => {
                             if let Ok(msg) = maybe_msg {
                                 if msg.0 == name_clone && msg.1 == 0 {
-                                    println!("Received abort message");
+                                    error!("Received abort message");
                                     abort_ping.abort();
                                     abort_read.abort();
                                 }
                             }
                         },
-                        _ = cancel_token_select.cancelled() => {
-                            println!("Canncellled");
-                            abort_read.abort();
-                            abort_ping.abort();
-                        },
-                        _ = read_handle_actual => {
-                            println!("Read handle");
-                            abort_read.abort();
-                            abort_ping.abort();
-                        }
-                        _ = ping_handle_actual => {
-                            println!("Ping handle");
+                        maybe_read_result = read_handle => {
+                            if let Ok(read_result) = maybe_read_result {
+                                if let Err(e) = read_result {
+                                   error!("Error: {:?}", e);
+                                }
+                            }
                             abort_read.abort();
                             abort_ping.abort();
                         }
+                        maybe_ping_result = ping_handle => {
+                            if let Ok(ping_result) = maybe_ping_result {
+                                if let Err(e) = ping_result {
+                                   error!("Error: {:?}", e);
+                                }
+                            }
+                            abort_read.abort();
+                            abort_ping.abort();
+                        }
+                    }
+                    
+                    {
+                        let locked_conn = conn_clone.read().await;
+                        let reconnect_timeout = locked_conn.config.reconnect_timeout;
+                        info!("Waiting for {} seconds before reconnecting", reconnect_timeout);
+                        sleep(Duration::from_secs(reconnect_timeout)).await;
                     }
                 }
             });
@@ -239,7 +267,7 @@ impl WSManager {
     
     pub async fn write(&mut self, name: &str, msg: Message) {
         if let Some(conn) = self.conn.get(name) {
-            let mut locked_conn = conn.lock().await;
+            let mut locked_conn = conn.write().await;
             locked_conn.write(msg).await;
         }
     }
@@ -247,15 +275,18 @@ impl WSManager {
 
 #[tokio::main]
 async fn main() {
+    env_logger::init();
+
     let hl_config = Config {
         url: "wss://api.hyperliquid.xyz/ws".to_string(),
         ping_duration: 10,
         ping_message: "{\"method\": \"ping\"}".to_string(),
+        reconnect_timeout: 5,
     };
     
     let mut hooks = ReadHooks::new();
     hooks.on_text = Arc::new(Some(Box::new(|text| {
-        println!("{:?}", text);
+        debug!("{:?}", text);
     })));
        
     let mut mgr = WSManager::new();
