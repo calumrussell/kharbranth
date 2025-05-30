@@ -230,6 +230,7 @@ impl Connection<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
         let read_loop = self.read_loop().await;
         let ping_loop = self.ping_loop().await;
        
+        sleep(Duration::from_millis(500)).await;
         for message in self.config.write_on_init.clone() {
             let _ = self.write(message).await;
         }
