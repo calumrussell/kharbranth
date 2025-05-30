@@ -3,9 +3,13 @@ name = "kharbranth"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "kharbranth"
+path = "src/lib.rs"
+
 [dependencies]
-tokio = { version = "1.45.1", features = ["full"] }
 tokio-tungstenite = { version = "0.26.2", features = ["native-tls"] }
+tokio = { version = "1.45.1", features = ["full"] }
 futures-util = { version = "0.3", features = ["std", "sink"] }
 tokio-util = "0.7.15"
 anyhow = "1.0.95"

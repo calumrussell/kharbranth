@@ -372,6 +372,7 @@ impl WSManager {
     }
 }
 
+#[cfg(test)]
 mod test {
     use std::sync::Arc;
 
@@ -379,7 +380,7 @@ mod test {
     use tokio::io::ErrorKind;
     use tokio::sync::Mutex;
     use tokio_test::io::Mock;
-    use tokio_tungstenite::{WebSocketStream, tungstenite::Message};
+    use tokio_tungstenite::{WebSocketStream};
 
     use crate::{Config, Connection, ReadHooks};
 
