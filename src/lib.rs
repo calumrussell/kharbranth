@@ -205,7 +205,7 @@ where
         })
     }
 
-    pub fn new(config: Config, hooks: ReadHooks) -> Self {
+    pub fn new(config: Config, hooks: ReadHooks, write_on_init: Vec<Message>) -> Self {
         Self {
             config,
             read: None,
@@ -229,6 +229,10 @@ impl Connection<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
 
         let read_loop = self.read_loop().await;
         let ping_loop = self.ping_loop().await;
+       
+        for message in self.config.write_on_init.clone() {
+            let _ = self.write(message).await;
+        }
 
         (read_loop, ping_loop)
     }
@@ -239,6 +243,7 @@ pub struct Config {
     pub ping_duration: u64,
     pub ping_message: String,
     pub reconnect_timeout: u64,
+    pub write_on_init: Vec<Message>,
 }
 
 pub enum BroadcastMessageType {
@@ -278,7 +283,7 @@ impl WSManager {
         }
     }
 
-    pub fn new_conn(&mut self, name: &str, config: Config, hooks: ReadHooks) {
+    pub fn new_conn(&mut self, name: &str, config: Config, hooks: ReadHooks, write_on_init: Vec<Message>) {
         let conn = Connection {
             config,
             read: None,
@@ -312,7 +317,7 @@ impl WSManager {
 
                     let abort_read = read_handle.abort_handle();
                     let abort_ping = ping_handle.abort_handle();
-
+                    
                     tokio::select! {
                         maybe_msg = rx_clone.recv() => {
                             if let Ok(msg) = maybe_msg {
@@ -392,11 +397,13 @@ mod test {
         )
         .await;
 
+        let write_on_init = Vec::new();
         let config = Config {
             ping_duration: 10,
             ping_message: "ping".to_string(),
             url: "wss://fake".to_string(),
             reconnect_timeout: 10,
+            write_on_init,
         };
 
         let (sink, stream) = ws_stream.split();
