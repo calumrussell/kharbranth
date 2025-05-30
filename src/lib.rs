@@ -283,7 +283,7 @@ impl WSManager {
         }
     }
 
-    pub fn new_conn(&mut self, name: &str, config: Config, hooks: ReadHooks, write_on_init: Vec<Message>) {
+    pub fn new_conn(&mut self, name: &str, config: Config, hooks: ReadHooks) {
         let conn = Connection {
             config,
             read: None,
