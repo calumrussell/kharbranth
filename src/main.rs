@@ -428,33 +428,3 @@ mod test {
         assert!(matches!(res.0.unwrap().err().unwrap(), ConnectionError));
     }
 }
-
-#[tokio::main]
-async fn main() {
-    env_logger::init();
-
-    let hl_config = Config {
-        url: "wss://api.hyperliquid.xyz/ws".to_string(),
-        ping_duration: 10,
-        ping_message: "{\"method\": \"ping\"}".to_string(),
-        reconnect_timeout: 5,
-    };
-
-    let mut hooks = ReadHooks::new();
-    hooks.on_text = Arc::new(Some(Box::new(|text| {
-        debug!("{:?}", text);
-    })));
-
-    let mut mgr = WSManager::new();
-    mgr.new_conn("hl", hl_config, hooks);
-
-    let (tx, _rx) = broadcast::channel(64);
-    let _handles = mgr.start(tx.clone()).await;
-
-    loop {
-        sleep(Duration::from_secs(5)).await;
-        mgr.write("hl", Message::Text("{ \"method\": \"subscribe\", \"subscription\": { \"type\": \"l2Book\", \"coin\": \"SOL\" } }".into())).await;
-        sleep(Duration::from_secs(10)).await;
-        let _ = tx.send(("hl".to_string(), 0));
-    }
-}
