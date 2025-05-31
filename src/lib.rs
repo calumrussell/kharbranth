@@ -4,7 +4,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use anyhow::anyhow;
+use anyhow::{anyhow, Result, Error};
 use futures_util::{
     SinkExt, StreamExt,
     stream::{SplitSink, SplitStream},
@@ -67,6 +67,7 @@ pub enum ConnectionError {
     ConnectionDropped,
     WriteError(String),
     ConnectionNotFound(String),
+    ConnectionInitFailed(String),
 }
 
 impl std::fmt::Display for ConnectionError {
@@ -85,13 +86,16 @@ impl std::fmt::Display for ConnectionError {
             ConnectionError::ConnectionNotFound(name) => {
                 write!(f, "Connection not found: {:?}", name)
             }
+            ConnectionError::ConnectionInitFailed(msg) => {
+                write!(f, "Connection intialization failed: {:?}", msg)
+            }
         }
     }
 }
 
 impl std::error::Error for ConnectionError {}
 
-type ConnectionResult = Result<(), anyhow::Error>;
+type ConnectionResult = Result<(), Error>;
 
 pub struct Connection<S> {
     pub config: Config,
@@ -218,24 +222,30 @@ where
 impl Connection<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
     pub async fn start_loop(
         &mut self,
-    ) -> (JoinHandle<ConnectionResult>, JoinHandle<ConnectionResult>) {
+    ) -> Result<(JoinHandle<ConnectionResult>, JoinHandle<ConnectionResult>), Error> {
         let request = self.config.url.clone().into_client_request().unwrap();
-        let (conn, response) = connect_async(request).await.unwrap();
-        debug!("Handshake response: {:?}", response);
-        let (write, read) = conn.split();
+        match connect_async(request).await {
+            Ok((conn, response)) => {
+                debug!("Handshake response: {:?}", response);
+                let (write, read) = conn.split();
 
-        self.read = Some(Arc::new(Mutex::new(read)));
-        self.write = Some(Arc::new(Mutex::new(write)));
+                self.read = Some(Arc::new(Mutex::new(read)));
+                self.write = Some(Arc::new(Mutex::new(write)));
 
-        let read_loop = self.read_loop().await;
-        let ping_loop = self.ping_loop().await;
-       
-        sleep(Duration::from_millis(500)).await;
-        for message in self.config.write_on_init.clone() {
-            let _ = self.write(message).await;
+                let read_loop = self.read_loop().await;
+                let ping_loop = self.ping_loop().await;
+               
+                sleep(Duration::from_millis(500)).await;
+                for message in self.config.write_on_init.clone() {
+                    let _ = self.write(message).await;
+                }
+
+                Ok((read_loop, ping_loop))
+            },
+            Err(e) => {
+                return Err(anyhow!(ConnectionError::ConnectionInitFailed(e.to_string())));
+            }
         }
-
-        (read_loop, ping_loop)
     }
 }
 
@@ -310,55 +320,74 @@ impl WSManager {
             let mut rx_clone = tx.subscribe();
             let manager_handle = tokio::spawn(async move {
                 loop {
-                    let (read_handle, ping_handle) = {
+                    let connection_attempt= {
                         let mut locked_conn = conn_clone.write().await;
-                        info!("Connected to {}", locked_conn.config.url);
+                        info!("Attempting connection to {}", locked_conn.config.url);
                         locked_conn.start_loop().await
                     };
 
-                    let abort_read = read_handle.abort_handle();
-                    let abort_ping = ping_handle.abort_handle();
-                    
-                    tokio::select! {
-                        maybe_msg = rx_clone.recv() => {
-                            if let Ok(msg) = maybe_msg {
-                                if msg.0 == name_clone {
-                                    if let Ok(msg_type) = msg.1.try_into() {
-                                        match msg_type {
-                                            BroadcastMessageType::Restart => {
-                                                error!("Received abort message");
-                                                abort_ping.abort();
-                                                abort_read.abort();
+                    if connection_attempt.is_err() {
+                        let err = connection_attempt.unwrap_err();
+                        error!("Connection attempt failed with: {:?}", err);
+
+                        {
+                            let locked_conn = conn_clone.read().await;
+                            let reconnect_timeout = locked_conn.config.reconnect_timeout;
+                            info!(
+                                "Waiting for {} seconds before reconnecting",
+                                reconnect_timeout
+                            );
+                            sleep(Duration::from_secs(reconnect_timeout)).await;
+                        }
+
+                    } else {
+                        let (read_handle, ping_handle) = connection_attempt.unwrap();
+                        info!("Connected");
+
+                        let abort_read = read_handle.abort_handle();
+                        let abort_ping = ping_handle.abort_handle();
+                        
+                        tokio::select! {
+                            maybe_msg = rx_clone.recv() => {
+                                if let Ok(msg) = maybe_msg {
+                                    if msg.0 == name_clone {
+                                        if let Ok(msg_type) = msg.1.try_into() {
+                                            match msg_type {
+                                                BroadcastMessageType::Restart => {
+                                                    error!("Received abort message");
+                                                    abort_ping.abort();
+                                                    abort_read.abort();
+                                                }
                                             }
                                         }
                                     }
                                 }
+                            },
+                            maybe_read_result = read_handle => {
+                                if let Ok(Err(e)) = maybe_read_result {
+                                    error!("Read loop error: {:?}", e);
+                                }
+                                abort_read.abort();
+                                abort_ping.abort();
+                            },
+                            maybe_ping_result = ping_handle => {
+                                if let Ok(Err(e)) = maybe_ping_result {
+                                    error!("Ping loop error: {:?}", e);
+                                }
+                                abort_read.abort();
+                                abort_ping.abort();
                             }
-                        },
-                        maybe_read_result = read_handle => {
-                            if let Ok(Err(e)) = maybe_read_result {
-                                error!("Read loop error: {:?}", e);
-                            }
-                            abort_read.abort();
-                            abort_ping.abort();
-                        },
-                        maybe_ping_result = ping_handle => {
-                            if let Ok(Err(e)) = maybe_ping_result {
-                                error!("Ping loop error: {:?}", e);
-                            }
-                            abort_read.abort();
-                            abort_ping.abort();
                         }
-                    }
 
-                    {
-                        let locked_conn = conn_clone.read().await;
-                        let reconnect_timeout = locked_conn.config.reconnect_timeout;
-                        info!(
-                            "Waiting for {} seconds before reconnecting",
-                            reconnect_timeout
-                        );
-                        sleep(Duration::from_secs(reconnect_timeout)).await;
+                        {
+                            let locked_conn = conn_clone.read().await;
+                            let reconnect_timeout = locked_conn.config.reconnect_timeout;
+                            info!(
+                                "Waiting for {} seconds before reconnecting",
+                                reconnect_timeout
+                            );
+                            sleep(Duration::from_secs(reconnect_timeout)).await;
+                        }
                     }
                 }
             });
