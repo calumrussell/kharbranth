@@ -354,7 +354,7 @@ impl WSManager {
                                         if let Ok(msg_type) = msg.1.try_into() {
                                             match msg_type {
                                                 BroadcastMessageType::Restart => {
-                                                    error!("Received abort message");
+                                                    error!("Received abort message for {:?}", name_clone);
                                                     abort_ping.abort();
                                                     abort_read.abort();
                                                 }
