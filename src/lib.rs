@@ -359,20 +359,6 @@ impl WSManager {
                                         }
                                     }
                                 }
-                            },
-                            maybe_read_result = read_handle => {
-                                if let Ok(Err(e)) = maybe_read_result {
-                                    error!("Read loop error: {:?}", e);
-                                }
-                                abort_read.abort();
-                                abort_ping.abort();
-                            },
-                            maybe_ping_result = ping_handle => {
-                                if let Ok(Err(e)) = maybe_ping_result {
-                                    error!("Ping loop error: {:?}", e);
-                                }
-                                abort_read.abort();
-                                abort_ping.abort();
                             }
                         });
                         
