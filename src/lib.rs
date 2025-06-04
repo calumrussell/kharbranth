@@ -209,7 +209,7 @@ where
         })
     }
 
-    pub fn new(config: Config, hooks: ReadHooks, write_on_init: Vec<Message>) -> Self {
+    pub fn new(config: Config, hooks: ReadHooks) -> Self {
         Self {
             config,
             read: None,
@@ -317,24 +317,25 @@ impl WSManager {
                 RwLock<Connection<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>>,
             > = Arc::clone(conn);
             let name_clone = name.clone();
-            let mut rx_clone = tx.subscribe();
+            let tx_clone = tx.clone();
             let manager_handle = tokio::spawn(async move {
                 loop {
                     let connection_attempt= {
                         let mut locked_conn = conn_clone.write().await;
-                        info!("Attempting connection to {}", locked_conn.config.url);
+                        info!("{}: Attempting connection to {}", name_clone, locked_conn.config.url);
                         locked_conn.start_loop().await
                     };
 
                     if connection_attempt.is_err() {
                         let err = connection_attempt.unwrap_err();
-                        error!("Connection attempt failed with: {:?}", err);
+                        error!("{}: Connection attempt failed with: {:?}", name_clone, err);
 
                         {
                             let locked_conn = conn_clone.read().await;
                             let reconnect_timeout = locked_conn.config.reconnect_timeout;
                             info!(
-                                "Waiting for {} seconds before reconnecting",
+                                "{}: Waiting for {} seconds before reconnecting",
+                                name_clone,
                                 reconnect_timeout
                             );
                             sleep(Duration::from_secs(reconnect_timeout)).await;
@@ -342,27 +343,47 @@ impl WSManager {
 
                     } else {
                         let (read_handle, ping_handle) = connection_attempt.unwrap();
-                        info!("Connected");
+                        info!("{}: Connected", name_clone);
 
-                        let abort_read = read_handle.abort_handle();
-                        let abort_ping = ping_handle.abort_handle();
-                        
-                        tokio::select! {
-                            maybe_msg = rx_clone.recv() => {
-                                if let Ok(msg) = maybe_msg {
-                                    if msg.0 == name_clone {
-                                        if let Ok(msg_type) = msg.1.try_into() {
-                                            match msg_type {
-                                                BroadcastMessageType::Restart => {
-                                                    error!("Received abort message for {:?}", name_clone);
-                                                    abort_ping.abort();
-                                                    abort_read.abort();
-                                                }
+                        let name_clone_two = name_clone.clone();
+                        let mut rx_clone = tx_clone.subscribe();
+                        let recv_handle = tokio::spawn(async move {
+                            while let Ok(msg) = rx_clone.recv().await {
+                                if msg.0 == name_clone_two {
+                                    if let Ok(msg_type) = msg.1.try_into() {
+                                        match msg_type {
+                                            BroadcastMessageType::Restart => {
+                                                error!("{}: Received abort message", name_clone_two);
+                                                return;
                                             }
                                         }
                                     }
                                 }
                             },
+                            maybe_read_result = read_handle => {
+                                if let Ok(Err(e)) = maybe_read_result {
+                                    error!("Read loop error: {:?}", e);
+                                }
+                                abort_read.abort();
+                                abort_ping.abort();
+                            },
+                            maybe_ping_result = ping_handle => {
+                                if let Ok(Err(e)) = maybe_ping_result {
+                                    error!("Ping loop error: {:?}", e);
+                                }
+                                abort_read.abort();
+                                abort_ping.abort();
+                            }
+                        });
+                        
+                        let abort_read = read_handle.abort_handle();
+                        let abort_ping = ping_handle.abort_handle();
+ 
+                        tokio::select! {
+                            _ = recv_handle => {
+                                abort_read.abort();
+                                abort_ping.abort();
+                            }
                             maybe_read_result = read_handle => {
                                 if let Ok(Err(e)) = maybe_read_result {
                                     error!("Read loop error: {:?}", e);
@@ -383,7 +404,8 @@ impl WSManager {
                             let locked_conn = conn_clone.read().await;
                             let reconnect_timeout = locked_conn.config.reconnect_timeout;
                             info!(
-                                "Waiting for {} seconds before reconnecting",
+                                "{}: Waiting for {} seconds before reconnecting",
+                                name_clone,
                                 reconnect_timeout
                             );
                             sleep(Duration::from_secs(reconnect_timeout)).await;
