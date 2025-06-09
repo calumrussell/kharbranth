@@ -24,6 +24,7 @@ use tokio_tungstenite::{
     },
 };
 use tokio_util::bytes::Bytes;
+use serde::{Deserialize, Serialize};
 
 type BytesFunc = Option<Box<dyn Fn(Bytes) + Send + Sync>>;
 type Utf8BytesFunc = Option<Box<dyn Fn(Utf8Bytes) + Send + Sync>>;
@@ -234,7 +235,7 @@ impl Connection<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
 
                 let read_loop = self.read_loop().await;
                 let ping_loop = self.ping_loop().await;
-               
+
                 sleep(Duration::from_millis(500)).await;
                 for message in self.config.write_on_init.clone() {
                     let _ = self.write(message).await;
@@ -272,7 +273,11 @@ impl TryFrom<u8> for BroadcastMessageType {
     }
 }
 
-pub type BroadcastMessage = (String, u8);
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BroadcastMessage {
+    pub target: String,
+    pub action: u8,
+}
 
 pub struct WSManager {
     conn: HashMap<
@@ -349,8 +354,8 @@ impl WSManager {
                         let mut rx_clone = tx_clone.subscribe();
                         let recv_handle = tokio::spawn(async move {
                             while let Ok(msg) = rx_clone.recv().await {
-                                if msg.0 == name_clone_two {
-                                    if let Ok(msg_type) = msg.1.try_into() {
+                                if msg.target == name_clone_two {
+                                    if let Ok(msg_type) = msg.action.try_into() {
                                         match msg_type {
                                             BroadcastMessageType::Restart => {
                                                 error!("{}: Received abort message", name_clone_two);
@@ -361,7 +366,6 @@ impl WSManager {
                                 }
                             }
                         });
-                        
                         let abort_read = read_handle.abort_handle();
                         let abort_ping = ping_handle.abort_handle();
  
