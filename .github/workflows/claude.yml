@@ -30,3 +30,4 @@ jobs:
           additional_permissions: |
             actions: read
           allowed_tools: "Bash(cargo:*)"
+          github_token: ${{ secrets.GITHUB_TOKEN }}
