@@ -280,10 +280,10 @@ pub struct BroadcastMessage {
 }
 
 pub struct WSManager {
-    conn: HashMap<
+    conn: Arc<RwLock<HashMap<
         String,
         Arc<RwLock<Connection<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>>>,
-    >,
+    >>>,
 }
 
 impl Default for WSManager {
@@ -295,11 +295,11 @@ impl Default for WSManager {
 impl WSManager {
     pub fn new() -> Self {
         Self {
-            conn: HashMap::new(),
+            conn: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    pub fn new_conn(&mut self, name: &str, config: Config, hooks: ReadHooks) {
+    pub async fn new_conn(&self, name: &str, config: Config, hooks: ReadHooks) {
         let conn = Connection {
             config,
             read: None,
@@ -307,17 +307,18 @@ impl WSManager {
             hooks,
         };
 
-        self.conn
-            .insert(name.to_string(), Arc::new(RwLock::new(conn)));
+        let mut connections = self.conn.write().await;
+        connections.insert(name.to_string(), Arc::new(RwLock::new(conn)));
     }
 
     pub async fn start(
         &self,
         tx: broadcast::Sender<BroadcastMessage>,
     ) -> HashMap<String, JoinHandle<()>> {
-        let mut res = HashMap::with_capacity(self.conn.len());
+        let connections = self.conn.read().await;
+        let mut res = HashMap::with_capacity(connections.len());
 
-        for (name, conn) in &self.conn {
+        for (name, conn) in &*connections {
             let conn_clone: Arc<
                 RwLock<Connection<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>>,
             > = Arc::clone(conn);
@@ -408,8 +409,9 @@ impl WSManager {
         res
     }
 
-    pub async fn write(&mut self, name: &str, msg: Message) -> ConnectionResult {
-        if let Some(conn) = self.conn.get(name) {
+    pub async fn write(&self, name: &str, msg: Message) -> ConnectionResult {
+        let connections = self.conn.read().await;
+        if let Some(conn) = connections.get(name) {
             let mut locked_conn = conn.write().await;
             return locked_conn.write(msg).await;
         }
