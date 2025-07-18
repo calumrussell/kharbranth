@@ -4,12 +4,14 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use anyhow::{anyhow, Result, Error};
+use anyhow::{Error, Result, anyhow};
+use dashmap::DashMap;
 use futures_util::{
     SinkExt, StreamExt,
     stream::{SplitSink, SplitStream},
 };
 use log::{debug, error, info};
+use serde::{Deserialize, Serialize};
 use tokio::{
     sync::{Mutex, RwLock, broadcast},
     task::JoinHandle,
@@ -24,8 +26,6 @@ use tokio_tungstenite::{
     },
 };
 use tokio_util::bytes::Bytes;
-use serde::{Deserialize, Serialize};
-use dashmap::DashMap;
 
 type BytesFunc = Option<Box<dyn Fn(Bytes) + Send + Sync>>;
 type Utf8BytesFunc = Option<Box<dyn Fn(Utf8Bytes) + Send + Sync>>;
@@ -98,11 +98,13 @@ impl std::fmt::Display for ConnectionError {
 impl std::error::Error for ConnectionError {}
 
 type ConnectionResult = Result<(), Error>;
+type ReadStream<S> = Arc<Mutex<SplitStream<WebSocketStream<S>>>>;
+type WriteStream<S> = Arc<Mutex<SplitSink<WebSocketStream<S>, Message>>>;
 
 pub struct Connection<S> {
     pub config: Config,
-    pub read: Option<Arc<Mutex<SplitStream<WebSocketStream<S>>>>>,
-    pub write: Option<Arc<Mutex<SplitSink<WebSocketStream<S>, Message>>>>,
+    pub read: Option<ReadStream<S>>,
+    pub write: Option<WriteStream<S>>,
     pub hooks: ReadHooks,
 }
 
@@ -243,9 +245,11 @@ impl Connection<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
                 }
 
                 Ok((read_loop, ping_loop))
-            },
+            }
             Err(e) => {
-                return Err(anyhow!(ConnectionError::ConnectionInitFailed(e.to_string())));
+                Err(anyhow!(ConnectionError::ConnectionInitFailed(
+                    e.to_string()
+                )))
             }
         }
     }
@@ -315,7 +319,8 @@ impl WSManager {
             hooks,
         };
 
-        self.conn.insert(name.to_string(), Arc::new(RwLock::new(conn)));
+        self.conn
+            .insert(name.to_string(), Arc::new(RwLock::new(conn)));
     }
 
     pub async fn start(
@@ -332,9 +337,12 @@ impl WSManager {
             let tx_clone = tx.clone();
             let manager_handle = tokio::spawn(async move {
                 loop {
-                    let connection_attempt= {
+                    let connection_attempt = {
                         let mut locked_conn = conn_clone.write().await;
-                        info!("{}: Attempting connection to {}", name_clone, locked_conn.config.url);
+                        info!(
+                            "{}: Attempting connection to {}",
+                            name_clone, locked_conn.config.url
+                        );
                         locked_conn.start_loop().await
                     };
 
@@ -347,12 +355,10 @@ impl WSManager {
                             let reconnect_timeout = locked_conn.config.reconnect_timeout;
                             info!(
                                 "{}: Waiting for {} seconds before reconnecting",
-                                name_clone,
-                                reconnect_timeout
+                                name_clone, reconnect_timeout
                             );
                             sleep(Duration::from_secs(reconnect_timeout)).await;
                         }
-
                     } else {
                         let (read_handle, ping_handle) = connection_attempt.unwrap();
                         info!("{}: Connected", name_clone);
@@ -365,7 +371,10 @@ impl WSManager {
                                     if let Ok(msg_type) = msg.action.try_into() {
                                         match msg_type {
                                             BroadcastMessageType::Restart => {
-                                                error!("{}: Received abort message", name_clone_two);
+                                                error!(
+                                                    "{}: Received abort message",
+                                                    name_clone_two
+                                                );
                                                 return;
                                             }
                                         }
@@ -375,7 +384,7 @@ impl WSManager {
                         });
                         let abort_read = read_handle.abort_handle();
                         let abort_ping = ping_handle.abort_handle();
- 
+
                         tokio::select! {
                             _ = recv_handle => {
                                 abort_read.abort();
@@ -402,8 +411,7 @@ impl WSManager {
                             let reconnect_timeout = locked_conn.config.reconnect_timeout;
                             info!(
                                 "{}: Waiting for {} seconds before reconnecting",
-                                name_clone,
-                                reconnect_timeout
+                                name_clone, reconnect_timeout
                             );
                             sleep(Duration::from_secs(reconnect_timeout)).await;
                         }
