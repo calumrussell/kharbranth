@@ -37,4 +37,4 @@ jobs:
             - Security concerns
             - Test coverage
           use_sticky_comment: true
-          allowed_tools: "Bash(cargo:*)"
+          allowed_tools: "Bash"
