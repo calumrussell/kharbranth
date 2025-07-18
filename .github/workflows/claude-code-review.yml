@@ -9,8 +9,7 @@ jobs:
     if: |
       (github.event.comment.user.login == 'calumrussell' && contains(github.event.comment.body, '@claude')) ||
       (github.event.review.user.login == 'calumrussell' && contains(github.event.review.body, '@claude'))
-
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     permissions:
       contents: read
       pull-requests: read

@@ -9,7 +9,7 @@ jobs:
     if: |
       contains(github.event.label.name, 'claude') &&
       github.event.issue.user.login == 'calumrussell'
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     permissions:
       contents: write
       pull-requests: write
