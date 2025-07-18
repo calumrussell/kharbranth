@@ -3,14 +3,15 @@ name: Claude Code Review
 on:
   pull_request_review_comment:
     types: [created]
+  issue_comment:
+    types: [created]
 
 jobs:
   claude-review:
     if: |
-      (github.event.comment.user.login == 'calumrussell' && contains(github.event.comment.body, '@claude')) ||
-      (github.event.review.user.login == 'calumrussell' && contains(github.event.review.body, '@claude'))
-
-    runs-on: ubuntu-latest
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request && github.event.comment.user.login == 'calumrussell' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review_comment' && github.event.comment.user.login == 'calumrussell' && contains(github.event.comment.body, '@claude'))
+    runs-on: self-hosted
     permissions:
       contents: read
       pull-requests: read
