@@ -36,6 +36,5 @@ jobs:
             - Performance considerations
             - Security concerns
             - Test coverage
-            Keep in mind the information in the .claude/ folder.
           use_sticky_comment: true
           allowed_tools: "Bash(cargo:*)"

@@ -30,5 +30,3 @@ jobs:
           additional_permissions: |
             actions: read
           allowed_tools: "Bash(cargo:*)"
-          custom_instructions: |
-            Check details about the project in .claude/ folder.
