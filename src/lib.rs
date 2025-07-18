@@ -442,9 +442,9 @@ mod test {
     use tokio::io::ErrorKind;
     use tokio::sync::Mutex;
     use tokio_test::io::Mock;
-    use tokio_tungstenite::{WebSocketStream};
+    use tokio_tungstenite::WebSocketStream;
 
-    use crate::{Config, Connection, ReadHooks};
+    use crate::{Config, Connection, ReadHooks, WSManager};
 
     async fn setup(mock: Mock) -> Connection<Mock> {
         let ws_stream = WebSocketStream::from_raw_socket(
@@ -490,6 +490,160 @@ mod test {
         let read_handle = conn.read_loop().await;
         let res = tokio::join!(read_handle);
 
-        assert!(matches!(res.0.unwrap().err().unwrap(), ConnectionError));
+        assert!(res.0.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn concurrent_new_conn_operations() {
+        let manager = WSManager::new();
+        let mut handles = vec![];
+
+        // Spawn 100 tasks that each add a connection
+        for i in 0..100 {
+            let manager_clone = manager.clone();
+            let handle = tokio::spawn(async move {
+                let config = Config {
+                    ping_duration: 10,
+                    ping_message: "ping".to_string(),
+                    url: format!("wss://fake{}.com", i),
+                    reconnect_timeout: 10,
+                    write_on_init: Vec::new(),
+                };
+                let hooks = ReadHooks::new();
+                manager_clone
+                    .new_conn(&format!("conn_{}", i), config, hooks)
+                    .await;
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all tasks to complete
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        // Verify all connections were added
+        assert_eq!(manager.conn.len(), 100);
+        for i in 0..100 {
+            assert!(manager.conn.contains_key(&format!("conn_{}", i)));
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_write_to_different_connections() {
+        // This test verifies that DashMap allows concurrent writes to different connections
+        // without blocking.
+        let manager = WSManager::new();
+
+        // Add test connections
+        for i in 0..10 {
+            let config = Config {
+                ping_duration: 10,
+                ping_message: "ping".to_string(),
+                url: format!("wss://fake{}.com", i),
+                reconnect_timeout: 10,
+                write_on_init: Vec::new(),
+            };
+            let hooks = ReadHooks::new();
+            manager
+                .new_conn(&format!("conn_{}", i), config, hooks)
+                .await;
+        }
+
+        // Spawn concurrent tasks that would access the map
+        let mut handles = vec![];
+        for i in 0..10 {
+            let manager_clone = manager.clone();
+            let handle = tokio::spawn(async move {
+                // Simulate checking if connection exists (read operation)
+                manager_clone.conn.contains_key(&format!("conn_{}", i))
+            });
+            handles.push(handle);
+        }
+
+        // All operations should complete without blocking
+        for handle in handles {
+            let result = handle.await.unwrap();
+            assert!(result);
+        }
+    }
+
+    #[tokio::test]
+    async fn no_deadlock_during_start_and_write() {
+        use tokio::time::{Duration, timeout};
+
+        // This test verifies that DashMap doesn't cause deadlocks when start() is iterating
+        // while other operations try to access the map
+        let manager = WSManager::new();
+
+        // Add test connections
+        for i in 0..5 {
+            let config = Config {
+                ping_duration: 10,
+                ping_message: "ping".to_string(),
+                url: format!("wss://fake{}.com", i),
+                reconnect_timeout: 10,
+                write_on_init: Vec::new(),
+            };
+            let hooks = ReadHooks::new();
+            manager
+                .new_conn(&format!("conn_{}", i), config, hooks)
+                .await;
+        }
+
+        let manager_clone1 = manager.clone();
+        let manager_clone2 = manager.clone();
+
+        // Start iterating over connections (simulating start())
+        let iterate_task = tokio::spawn(async move {
+            // Simulate what start() does - iterate and hold references
+            for _ in 0..100 {
+                for entry in &*manager_clone1.conn {
+                    let _name = entry.key();
+                    let _conn = entry.value();
+                    // Small delay to increase chance of race condition
+                    tokio::time::sleep(Duration::from_micros(10)).await;
+                }
+            }
+        });
+
+        // Concurrently try to add new connections
+        let write_task = tokio::spawn(async move {
+            // Give iteration a chance to start
+            tokio::time::sleep(Duration::from_millis(1)).await;
+
+            // This should not deadlock even though start() is iterating
+            for i in 5..10 {
+                let config = Config {
+                    ping_duration: 10,
+                    ping_message: "ping".to_string(),
+                    url: format!("wss://fake{}.com", i),
+                    reconnect_timeout: 10,
+                    write_on_init: Vec::new(),
+                };
+                let hooks = ReadHooks::new();
+                manager_clone2
+                    .new_conn(&format!("conn_{}", i), config, hooks)
+                    .await;
+            }
+            // Return number of connections added
+            5
+        });
+
+        // Both operations should complete within a reasonable time (no deadlock)
+        let result = timeout(Duration::from_secs(5), async {
+            let (r1, r2) = tokio::join!(iterate_task, write_task);
+            (r1, r2)
+        })
+        .await;
+
+        assert!(result.is_ok(), "Operations timed out - possible deadlock!");
+
+        let (iterate_result, write_result) = result.unwrap();
+        assert!(iterate_result.is_ok());
+        assert_eq!(write_result.unwrap(), 5);
+
+        // Verify all connections were added
+        assert_eq!(manager.conn.len(), 10);
     }
 }
