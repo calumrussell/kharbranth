@@ -280,11 +280,10 @@ pub struct BroadcastMessage {
     pub action: u8,
 }
 
+type ConnectionType = Connection<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
 pub struct WSManager {
-    conn: DashMap<
-        String,
-        Arc<RwLock<Connection<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>>>,
-    >,
+    conn: DashMap<String, Arc<RwLock<ConnectionType>>>,
 }
 
 impl Default for WSManager {
@@ -320,9 +319,7 @@ impl WSManager {
         for entry in &self.conn {
             let name = entry.key();
             let conn = entry.value();
-            let conn_clone: Arc<
-                RwLock<Connection<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>>,
-            > = Arc::clone(conn);
+            let conn_clone: Arc<RwLock<ConnectionType>> = Arc::clone(conn);
             let name_clone = name.clone();
             let tx_clone = tx.clone();
             let manager_handle = tokio::spawn(async move {
