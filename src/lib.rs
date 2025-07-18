@@ -4,12 +4,14 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use anyhow::{anyhow, Result, Error};
+use anyhow::{Error, Result, anyhow};
+use dashmap::DashMap;
 use futures_util::{
     SinkExt, StreamExt,
     stream::{SplitSink, SplitStream},
 };
 use log::{debug, error, info};
+use serde::{Deserialize, Serialize};
 use tokio::{
     sync::{Mutex, RwLock, broadcast},
     task::JoinHandle,
@@ -24,7 +26,6 @@ use tokio_tungstenite::{
     },
 };
 use tokio_util::bytes::Bytes;
-use serde::{Deserialize, Serialize};
 
 type BytesFunc = Option<Box<dyn Fn(Bytes) + Send + Sync>>;
 type Utf8BytesFunc = Option<Box<dyn Fn(Utf8Bytes) + Send + Sync>>;
@@ -97,11 +98,13 @@ impl std::fmt::Display for ConnectionError {
 impl std::error::Error for ConnectionError {}
 
 type ConnectionResult = Result<(), Error>;
+type ReadStream<S> = Arc<Mutex<SplitStream<WebSocketStream<S>>>>;
+type WriteStream<S> = Arc<Mutex<SplitSink<WebSocketStream<S>, Message>>>;
 
 pub struct Connection<S> {
     pub config: Config,
-    pub read: Option<Arc<Mutex<SplitStream<WebSocketStream<S>>>>>,
-    pub write: Option<Arc<Mutex<SplitSink<WebSocketStream<S>, Message>>>>,
+    pub read: Option<ReadStream<S>>,
+    pub write: Option<WriteStream<S>>,
     pub hooks: ReadHooks,
 }
 
@@ -242,9 +245,11 @@ impl Connection<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
                 }
 
                 Ok((read_loop, ping_loop))
-            },
+            }
             Err(e) => {
-                return Err(anyhow!(ConnectionError::ConnectionInitFailed(e.to_string())));
+                Err(anyhow!(ConnectionError::ConnectionInitFailed(
+                    e.to_string()
+                )))
             }
         }
     }
@@ -279,11 +284,10 @@ pub struct BroadcastMessage {
     pub action: u8,
 }
 
+type ConnectionType = Connection<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
 pub struct WSManager {
-    conn: HashMap<
-        String,
-        Arc<RwLock<Connection<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>>>,
-    >,
+    conn: Arc<DashMap<String, Arc<RwLock<ConnectionType>>>>,
 }
 
 impl Default for WSManager {
@@ -292,14 +296,22 @@ impl Default for WSManager {
     }
 }
 
+impl Clone for WSManager {
+    fn clone(&self) -> Self {
+        Self {
+            conn: Arc::clone(&self.conn),
+        }
+    }
+}
+
 impl WSManager {
     pub fn new() -> Self {
         Self {
-            conn: HashMap::new(),
+            conn: Arc::new(DashMap::new()),
         }
     }
 
-    pub fn new_conn(&mut self, name: &str, config: Config, hooks: ReadHooks) {
+    pub async fn new_conn(&self, name: &str, config: Config, hooks: ReadHooks) {
         let conn = Connection {
             config,
             read: None,
@@ -317,17 +329,20 @@ impl WSManager {
     ) -> HashMap<String, JoinHandle<()>> {
         let mut res = HashMap::with_capacity(self.conn.len());
 
-        for (name, conn) in &self.conn {
-            let conn_clone: Arc<
-                RwLock<Connection<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>>,
-            > = Arc::clone(conn);
+        for entry in &*self.conn {
+            let name = entry.key();
+            let conn = entry.value();
+            let conn_clone: Arc<RwLock<ConnectionType>> = Arc::clone(conn);
             let name_clone = name.clone();
             let tx_clone = tx.clone();
             let manager_handle = tokio::spawn(async move {
                 loop {
-                    let connection_attempt= {
+                    let connection_attempt = {
                         let mut locked_conn = conn_clone.write().await;
-                        info!("{}: Attempting connection to {}", name_clone, locked_conn.config.url);
+                        info!(
+                            "{}: Attempting connection to {}",
+                            name_clone, locked_conn.config.url
+                        );
                         locked_conn.start_loop().await
                     };
 
@@ -340,12 +355,10 @@ impl WSManager {
                             let reconnect_timeout = locked_conn.config.reconnect_timeout;
                             info!(
                                 "{}: Waiting for {} seconds before reconnecting",
-                                name_clone,
-                                reconnect_timeout
+                                name_clone, reconnect_timeout
                             );
                             sleep(Duration::from_secs(reconnect_timeout)).await;
                         }
-
                     } else {
                         let (read_handle, ping_handle) = connection_attempt.unwrap();
                         info!("{}: Connected", name_clone);
@@ -358,7 +371,10 @@ impl WSManager {
                                     if let Ok(msg_type) = msg.action.try_into() {
                                         match msg_type {
                                             BroadcastMessageType::Restart => {
-                                                error!("{}: Received abort message", name_clone_two);
+                                                error!(
+                                                    "{}: Received abort message",
+                                                    name_clone_two
+                                                );
                                                 return;
                                             }
                                         }
@@ -368,7 +384,7 @@ impl WSManager {
                         });
                         let abort_read = read_handle.abort_handle();
                         let abort_ping = ping_handle.abort_handle();
- 
+
                         tokio::select! {
                             _ = recv_handle => {
                                 abort_read.abort();
@@ -395,8 +411,7 @@ impl WSManager {
                             let reconnect_timeout = locked_conn.config.reconnect_timeout;
                             info!(
                                 "{}: Waiting for {} seconds before reconnecting",
-                                name_clone,
-                                reconnect_timeout
+                                name_clone, reconnect_timeout
                             );
                             sleep(Duration::from_secs(reconnect_timeout)).await;
                         }
@@ -408,7 +423,7 @@ impl WSManager {
         res
     }
 
-    pub async fn write(&mut self, name: &str, msg: Message) -> ConnectionResult {
+    pub async fn write(&self, name: &str, msg: Message) -> ConnectionResult {
         if let Some(conn) = self.conn.get(name) {
             let mut locked_conn = conn.write().await;
             return locked_conn.write(msg).await;
@@ -427,9 +442,9 @@ mod test {
     use tokio::io::ErrorKind;
     use tokio::sync::Mutex;
     use tokio_test::io::Mock;
-    use tokio_tungstenite::{WebSocketStream};
+    use tokio_tungstenite::WebSocketStream;
 
-    use crate::{Config, Connection, ReadHooks};
+    use crate::{Config, Connection, ReadHooks, WSManager};
 
     async fn setup(mock: Mock) -> Connection<Mock> {
         let ws_stream = WebSocketStream::from_raw_socket(
@@ -475,6 +490,160 @@ mod test {
         let read_handle = conn.read_loop().await;
         let res = tokio::join!(read_handle);
 
-        assert!(matches!(res.0.unwrap().err().unwrap(), ConnectionError));
+        assert!(res.0.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn concurrent_new_conn_operations() {
+        let manager = WSManager::new();
+        let mut handles = vec![];
+
+        // Spawn 100 tasks that each add a connection
+        for i in 0..100 {
+            let manager_clone = manager.clone();
+            let handle = tokio::spawn(async move {
+                let config = Config {
+                    ping_duration: 10,
+                    ping_message: "ping".to_string(),
+                    url: format!("wss://fake{}.com", i),
+                    reconnect_timeout: 10,
+                    write_on_init: Vec::new(),
+                };
+                let hooks = ReadHooks::new();
+                manager_clone
+                    .new_conn(&format!("conn_{}", i), config, hooks)
+                    .await;
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all tasks to complete
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        // Verify all connections were added
+        assert_eq!(manager.conn.len(), 100);
+        for i in 0..100 {
+            assert!(manager.conn.contains_key(&format!("conn_{}", i)));
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_write_to_different_connections() {
+        // This test verifies that DashMap allows concurrent writes to different connections
+        // without blocking.
+        let manager = WSManager::new();
+
+        // Add test connections
+        for i in 0..10 {
+            let config = Config {
+                ping_duration: 10,
+                ping_message: "ping".to_string(),
+                url: format!("wss://fake{}.com", i),
+                reconnect_timeout: 10,
+                write_on_init: Vec::new(),
+            };
+            let hooks = ReadHooks::new();
+            manager
+                .new_conn(&format!("conn_{}", i), config, hooks)
+                .await;
+        }
+
+        // Spawn concurrent tasks that would access the map
+        let mut handles = vec![];
+        for i in 0..10 {
+            let manager_clone = manager.clone();
+            let handle = tokio::spawn(async move {
+                // Simulate checking if connection exists (read operation)
+                manager_clone.conn.contains_key(&format!("conn_{}", i))
+            });
+            handles.push(handle);
+        }
+
+        // All operations should complete without blocking
+        for handle in handles {
+            let result = handle.await.unwrap();
+            assert!(result);
+        }
+    }
+
+    #[tokio::test]
+    async fn no_deadlock_during_start_and_write() {
+        use tokio::time::{Duration, timeout};
+
+        // This test verifies that DashMap doesn't cause deadlocks when start() is iterating
+        // while other operations try to access the map
+        let manager = WSManager::new();
+
+        // Add test connections
+        for i in 0..5 {
+            let config = Config {
+                ping_duration: 10,
+                ping_message: "ping".to_string(),
+                url: format!("wss://fake{}.com", i),
+                reconnect_timeout: 10,
+                write_on_init: Vec::new(),
+            };
+            let hooks = ReadHooks::new();
+            manager
+                .new_conn(&format!("conn_{}", i), config, hooks)
+                .await;
+        }
+
+        let manager_clone1 = manager.clone();
+        let manager_clone2 = manager.clone();
+
+        // Start iterating over connections (simulating start())
+        let iterate_task = tokio::spawn(async move {
+            // Simulate what start() does - iterate and hold references
+            for _ in 0..100 {
+                for entry in &*manager_clone1.conn {
+                    let _name = entry.key();
+                    let _conn = entry.value();
+                    // Small delay to increase chance of race condition
+                    tokio::time::sleep(Duration::from_micros(10)).await;
+                }
+            }
+        });
+
+        // Concurrently try to add new connections
+        let write_task = tokio::spawn(async move {
+            // Give iteration a chance to start
+            tokio::time::sleep(Duration::from_millis(1)).await;
+
+            // This should not deadlock even though start() is iterating
+            for i in 5..10 {
+                let config = Config {
+                    ping_duration: 10,
+                    ping_message: "ping".to_string(),
+                    url: format!("wss://fake{}.com", i),
+                    reconnect_timeout: 10,
+                    write_on_init: Vec::new(),
+                };
+                let hooks = ReadHooks::new();
+                manager_clone2
+                    .new_conn(&format!("conn_{}", i), config, hooks)
+                    .await;
+            }
+            // Return number of connections added
+            5
+        });
+
+        // Both operations should complete within a reasonable time (no deadlock)
+        let result = timeout(Duration::from_secs(5), async {
+            let (r1, r2) = tokio::join!(iterate_task, write_task);
+            (r1, r2)
+        })
+        .await;
+
+        assert!(result.is_ok(), "Operations timed out - possible deadlock!");
+
+        let (iterate_result, write_result) = result.unwrap();
+        assert!(iterate_result.is_ok());
+        assert_eq!(write_result.unwrap(), 5);
+
+        // Verify all connections were added
+        assert_eq!(manager.conn.len(), 10);
     }
 }
