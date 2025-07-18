@@ -17,6 +17,13 @@ jobs:
       id-token: write
       actions: read
     steps:
+      - name: Debug Environment
+        run: |
+          echo "PATH: $PATH"
+          echo "USER: $USER"
+          which claude || echo "Claude not found in PATH"
+          ls -la /home/calum/.local/bin/claude || echo "Claude not found at expected location"
+          
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
