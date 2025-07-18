@@ -283,7 +283,7 @@ pub struct BroadcastMessage {
 type ConnectionType = Connection<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 pub struct WSManager {
-    conn: DashMap<String, Arc<RwLock<ConnectionType>>>,
+    conn: Arc<DashMap<String, Arc<RwLock<ConnectionType>>>>,
 }
 
 impl Default for WSManager {
@@ -292,10 +292,18 @@ impl Default for WSManager {
     }
 }
 
+impl Clone for WSManager {
+    fn clone(&self) -> Self {
+        Self {
+            conn: Arc::clone(&self.conn),
+        }
+    }
+}
+
 impl WSManager {
     pub fn new() -> Self {
         Self {
-            conn: DashMap::new(),
+            conn: Arc::new(DashMap::new()),
         }
     }
 
@@ -316,7 +324,7 @@ impl WSManager {
     ) -> HashMap<String, JoinHandle<()>> {
         let mut res = HashMap::with_capacity(self.conn.len());
 
-        for entry in &self.conn {
+        for entry in &*self.conn {
             let name = entry.key();
             let conn = entry.value();
             let conn_clone: Arc<RwLock<ConnectionType>> = Arc::clone(conn);
