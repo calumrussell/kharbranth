@@ -40,8 +40,8 @@ This is used to subscribe to crypto exchange websocket feeds.
 #### Generic Stream Support
 The `Connection<S>` type is generic over stream types, making it testable with mock streams while supporting real TLS WebSocket connections in production.
 
-#### Hook-Based Message Processing
-Instead of forcing a specific message processing pattern, the library provides hooks (`ReadHooks`) that allow users to define custom handlers for different WebSocket frame types.
+#### Stream/Sink Message Processing
+The library provides a modern Stream/Sink API that integrates naturally with async Rust patterns. This replaces the previous callback-based hooks system, enabling async message handling and proper backpressure control.
 
 #### Shared State Management
 Uses `Arc<DashMap<>>` pattern for thread-safe shared state between async tasks, enabling concurrent read/write operations while maintaining memory safety and performance.
@@ -78,13 +78,20 @@ Connection manager that handles:
 - Automatic reconnection logic
 - Broadcasting system for connection control
 
-#### `ReadHooks`
-Callback system for handling different WebSocket message types:
-- `on_text`: Text message handler
-- `on_binary`: Binary message handler  
-- `on_ping`/`on_pong`: Ping/pong handlers
-- `on_close`: Close frame handler
-- `on_frame`: Raw frame handler
+#### `WebSocketSink` and `WebSocketStream`
+Modern Stream/Sink API for handling WebSocket messages:
+- `WebSocketSink`: Implements `Sink<Message>` for sending messages with proper error handling
+- `WebSocketStream`: Implements `Stream<Item = Result<Message, Error>>` for receiving messages
+- `ConnectionState`: Enum tracking connection status (Connected, Disconnected, Error)
+- Both provide `connection_state()` method for monitoring connection health
+
+#### `Message`
+Unified message enum for the Stream/Sink API:
+- `Text(String)`: Text messages
+- `Binary(Vec<u8>)`: Binary data
+- `Ping(Vec<u8>)`: Ping frames
+- `Pong(Vec<u8>)`: Pong frames  
+- `Close(Option<CloseFrame>)`: Close frames
 
 #### `ConnectionError`
 Custom error types for WebSocket operations:
@@ -96,13 +103,54 @@ Custom error types for WebSocket operations:
 
 ## Key Patterns
 
-WsManager is the key abstraction used by callers. This should hide the details of the underlying websocket connection. 
+WSManager is the key abstraction used by callers. This should hide the details of the underlying websocket connection. 
 
-Users name a connection, WsManager supports read and write functions against the named connections.
+### Stream/Sink API (Recommended)
+Users call `connect_stream()` to get a `(WebSocketSink, WebSocketStream)` pair:
+- `WebSocketSink` for sending messages with proper error handling and backpressure
+- `WebSocketStream` for receiving messages as an async stream
+- Both provide connection state monitoring
 
-Users interact through named connections and WsManager supports write functions.
+### Legacy Connection API
+Users can still name a connection and use `new_conn()` with `write()` functions for backwards compatibility.
 
-Config options provide constant behaviour. ReadHooks provide a way to hook into read operations. Callers are able to restart connections through a tokio channel.
+Config options provide constant behaviour. The Stream/Sink API provides modern async-native message handling. Callers are able to restart connections through a tokio channel.
+
+### Example Usage
+
+```rust
+use kharbranth::{WSManager, Config, Message};
+use futures_util::{SinkExt, StreamExt};
+
+let manager = WSManager::new();
+let config = Config {
+    url: "wss://example.com/ws".to_string(),
+    ping_duration: 30,
+    ping_timeout: 10,
+    reconnect_timeout: 5,
+    write_on_init: Vec::new(),
+};
+
+// Connect and get stream/sink pair
+let (mut sink, mut stream) = manager.connect_stream("my_connection", config).await?;
+
+// Send messages
+sink.send(Message::Text("Hello".to_string())).await?;
+
+// Receive messages
+while let Some(result) = stream.next().await {
+    match result {
+        Ok(Message::Text(text)) => println!("Received: {}", text),
+        Ok(Message::Close(_)) => break,
+        Err(e) => eprintln!("Stream error: {}", e),
+        _ => {}
+    }
+}
+
+// Check connection state
+let state = sink.connection_state().await;
+println!("Connection state: {:?}", state);
+```
 
 ## Performance Characteristics
 

@@ -56,19 +56,25 @@ async fn main() -> Result<()> {
 
     // Spawn a task to handle incoming messages
     tokio::spawn(async move {
-        while let Some(message) = stream.next().await {
-            match message {
-                Message::Text(text) => {
-                    info!("Received text: {}", text);
-                }
-                Message::Binary(data) => {
-                    info!("Received binary data: {} bytes", data.len());
-                }
-                Message::Close(_) => {
-                    info!("Connection closed");
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(message) => match message {
+                    Message::Text(text) => {
+                        info!("Received text: {}", text);
+                    }
+                    Message::Binary(data) => {
+                        info!("Received binary data: {} bytes", data.len());
+                    }
+                    Message::Close(_) => {
+                        info!("Connection closed");
+                        break;
+                    }
+                    _ => {}
+                },
+                Err(e) => {
+                    info!("Stream error: {}", e);
                     break;
                 }
-                _ => {}
             }
         }
     });

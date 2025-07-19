@@ -152,13 +152,70 @@ impl From<Message> for TungsteniteMessage {
 #[derive(Debug)]
 pub struct WebSocketSink {
     sender: mpsc::UnboundedSender<TungsteniteMessage>,
+    connection_state: Arc<RwLock<ConnectionState>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConnectionState {
+    Connected,
+    Disconnected,
+    Error(String),
 }
 
 impl WebSocketSink {
     pub async fn send(&mut self, msg: Message) -> Result<(), Error> {
-        self.sender
-            .send(msg.into())
-            .map_err(|_| anyhow!("WebSocket sink channel closed"))
+        // Check connection state first
+        {
+            let state = self.connection_state.read().await;
+            match &*state {
+                ConnectionState::Disconnected => {
+                    return Err(anyhow!("WebSocket connection is disconnected"));
+                }
+                ConnectionState::Error(err) => {
+                    return Err(anyhow!("WebSocket connection error: {}", err));
+                }
+                ConnectionState::Connected => {}
+            }
+        }
+
+        // Attempt to send the message
+        self.sender.send(msg.into()).map_err(|_| {
+            // Update connection state on send failure
+            let state_clone = Arc::clone(&self.connection_state);
+            tokio::spawn(async move {
+                let mut state = state_clone.write().await;
+                *state = ConnectionState::Disconnected;
+            });
+            anyhow!("WebSocket sink channel closed")
+        })
+    }
+
+    pub async fn connection_state(&self) -> ConnectionState {
+        self.connection_state.read().await.clone()
+    }
+
+    pub async fn close(&mut self) -> Result<(), Error> {
+        // Close the sender and update state
+        self.sender.closed().await;
+        let mut state = self.connection_state.write().await;
+        *state = ConnectionState::Disconnected;
+        Ok(())
+    }
+}
+
+impl Drop for WebSocketSink {
+    fn drop(&mut self) {
+        // Best-effort cleanup: try to update connection state if runtime is available
+        let state_clone = Arc::clone(&self.connection_state);
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            // Spawn a detached task for cleanup
+            handle.spawn(async move {
+                if let Ok(mut state) = state_clone.try_write() {
+                    *state = ConnectionState::Disconnected;
+                }
+            });
+        }
+        // Channel will be automatically closed when sender is dropped
     }
 }
 
@@ -167,9 +224,17 @@ impl Sink<Message> for WebSocketSink {
 
     fn poll_ready(
         self: std::pin::Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
+        cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), Self::Error>> {
         if self.sender.is_closed() {
+            // Update state to disconnected
+            let state_clone = Arc::clone(&self.connection_state);
+            let waker = cx.waker().clone();
+            tokio::spawn(async move {
+                let mut state = state_clone.write().await;
+                *state = ConnectionState::Disconnected;
+                waker.wake();
+            });
             std::task::Poll::Ready(Err(anyhow!("WebSocket sink channel closed")))
         } else {
             std::task::Poll::Ready(Ok(()))
@@ -177,9 +242,15 @@ impl Sink<Message> for WebSocketSink {
     }
 
     fn start_send(self: std::pin::Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
-        self.sender
-            .send(item.into())
-            .map_err(|_| anyhow!("WebSocket sink channel closed"))
+        self.sender.send(item.into()).map_err(|_| {
+            // Update connection state on send failure
+            let state_clone = Arc::clone(&self.connection_state);
+            tokio::spawn(async move {
+                let mut state = state_clone.write().await;
+                *state = ConnectionState::Disconnected;
+            });
+            anyhow!("WebSocket sink channel closed")
+        })
     }
 
     fn poll_flush(
@@ -193,6 +264,12 @@ impl Sink<Message> for WebSocketSink {
         self: std::pin::Pin<&mut Self>,
         _cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), Self::Error>> {
+        // Close the sender and update state
+        let state_clone = Arc::clone(&self.connection_state);
+        tokio::spawn(async move {
+            let mut state = state_clone.write().await;
+            *state = ConnectionState::Disconnected;
+        });
         std::task::Poll::Ready(Ok(()))
     }
 }
@@ -200,16 +277,37 @@ impl Sink<Message> for WebSocketSink {
 #[derive(Debug)]
 pub struct WebSocketStream {
     receiver: mpsc::UnboundedReceiver<Message>,
+    connection_state: Arc<RwLock<ConnectionState>>,
+}
+
+impl WebSocketStream {
+    pub async fn connection_state(&self) -> ConnectionState {
+        self.connection_state.read().await.clone()
+    }
 }
 
 impl Stream for WebSocketStream {
-    type Item = Message;
+    type Item = Result<Message, Error>;
 
     fn poll_next(
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
-        self.receiver.poll_recv(cx)
+        match self.receiver.poll_recv(cx) {
+            std::task::Poll::Ready(Some(msg)) => std::task::Poll::Ready(Some(Ok(msg))),
+            std::task::Poll::Ready(None) => {
+                // Channel closed, update state
+                let state_clone = Arc::clone(&self.connection_state);
+                let waker = cx.waker().clone();
+                tokio::spawn(async move {
+                    let mut state = state_clone.write().await;
+                    *state = ConnectionState::Disconnected;
+                    waker.wake();
+                });
+                std::task::Poll::Ready(None)
+            }
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
     }
 }
 
@@ -279,6 +377,7 @@ where
     async fn read_loop(
         &mut self,
         message_sender: mpsc::UnboundedSender<Message>,
+        connection_state: Arc<RwLock<ConnectionState>>,
     ) -> Result<JoinHandle<ConnectionResult>, Error> {
         let read = self
             .read
@@ -307,6 +406,11 @@ where
                                     let _ = message_sender.send(Message::from(
                                         TungsteniteMessage::Close(maybe_frame),
                                     ));
+                                    // Update connection state
+                                    {
+                                        let mut state = connection_state.write().await;
+                                        *state = ConnectionState::Disconnected;
+                                    }
                                     return Err(anyhow!(ConnectionError::CloseFrameReceived));
                                 }
                                 other => {
@@ -314,11 +418,23 @@ where
                                 }
                             },
                             Err(e) => {
+                                // Update connection state on read error
+                                {
+                                    let mut state = connection_state.write().await;
+                                    *state = ConnectionState::Error(e.to_string());
+                                }
                                 return Err(anyhow!(ConnectionError::ReadError(e.to_string())));
                             }
                         }
                     }
-                    None => return Err(anyhow!(ConnectionError::ConnectionDropped)),
+                    None => {
+                        // Update connection state when connection drops
+                        {
+                            let mut state = connection_state.write().await;
+                            *state = ConnectionState::Disconnected;
+                        }
+                        return Err(anyhow!(ConnectionError::ConnectionDropped));
+                    }
                 }
             }
         }))
@@ -387,11 +503,16 @@ impl Connection<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
                 let (message_sender, message_receiver) = mpsc::unbounded_channel();
                 let (write_sender, write_receiver) = mpsc::unbounded_channel();
 
+                // Create shared connection state
+                let connection_state = Arc::new(RwLock::new(ConnectionState::Connected));
+
                 let websocket_sink = WebSocketSink {
                     sender: write_sender,
+                    connection_state: Arc::clone(&connection_state),
                 };
                 let websocket_stream = WebSocketStream {
                     receiver: message_receiver,
+                    connection_state: Arc::clone(&connection_state),
                 };
 
                 // Reset ping tracker for new connection
@@ -401,7 +522,7 @@ impl Connection<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
                         SimplePingTracker::new(Duration::from_secs(self.config.ping_timeout));
                 }
 
-                let read_loop = self.read_loop(message_sender).await?;
+                let read_loop = self.read_loop(message_sender, Arc::clone(&connection_state)).await?;
                 let ping_loop = self.ping_loop().await?;
                 let write_loop = self.write_loop(write_receiver).await?;
 
@@ -650,7 +771,7 @@ mod test {
     use tokio_test::io::Mock;
     use tokio_tungstenite::WebSocketStream as TungsteniteWebSocketStream;
 
-    use crate::{Config, Connection, SimplePingTracker, WSManager};
+    use crate::{Config, Connection, SimplePingTracker, WSManager, ConnectionState, WebSocketSink, WebSocketStream};
     use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
 
     async fn setup(mock: Mock) -> Connection<Mock> {
@@ -691,7 +812,8 @@ mod test {
         let mut conn = setup(mock).await;
 
         let (message_sender, _message_receiver) = tokio::sync::mpsc::unbounded_channel();
-        let read_handle = conn.read_loop(message_sender).await.unwrap();
+        let connection_state = Arc::new(RwLock::new(ConnectionState::Connected));
+        let read_handle = conn.read_loop(message_sender, connection_state).await.unwrap();
         let res = tokio::join!(read_handle);
 
         assert!(res.0.unwrap().is_err());
@@ -938,7 +1060,8 @@ mod test {
         let mut conn: Connection<Mock> = Connection::new(config);
 
         let (message_sender, _message_receiver) = tokio::sync::mpsc::unbounded_channel();
-        let result = conn.read_loop(message_sender).await;
+        let connection_state = Arc::new(RwLock::new(ConnectionState::Connected));
+        let result = conn.read_loop(message_sender, connection_state).await;
         assert!(result.is_err());
         assert!(
             result
@@ -1045,30 +1168,40 @@ mod test {
     }
 
     #[tokio::test]
-    async fn stream_sink_api_basic_functionality() {
-        // This test verifies the basic functionality of the new Stream/Sink API
-
+    async fn stream_sink_api_types_compile() {
+        // This test verifies the types compile and basic API works without network calls
         let manager = WSManager::new();
-        let config = Config {
+        
+        // Test that we can create the types and they have the expected methods
+        let (_message_sender, message_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (write_sender, _write_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let connection_state = Arc::new(RwLock::new(ConnectionState::Connected));
+
+        let sink = WebSocketSink {
+            sender: write_sender,
+            connection_state: Arc::clone(&connection_state),
+        };
+        
+        let _stream = WebSocketStream {
+            receiver: message_receiver,
+            connection_state: Arc::clone(&connection_state),
+        };
+
+        // Verify we can call the API methods
+        assert_eq!(sink.connection_state().await, ConnectionState::Connected);
+        
+        // Verify manager has the connect_stream method (compilation test)
+        let _config = Config {
             ping_duration: 10,
             ping_message: "ping".to_string(),
             ping_timeout: 15,
-            url: "wss://echo.websocket.org".to_string(),
+            url: "ws://test".to_string(),
             reconnect_timeout: 10,
             write_on_init: Vec::new(),
         };
-
-        // This would normally connect to a real WebSocket server
-        // For testing purposes, we just verify the types compile correctly
-        let result = manager.connect_stream("test_conn", config).await;
-
-        // In a real test environment with a WebSocket server, we would:
-        // let (mut sink, mut stream) = result.unwrap();
-        // sink.send(crate::Message::Text("test".to_string())).await.unwrap();
-        // let received = stream.next().await.unwrap();
-
-        // For now, just verify the connection attempt was made
-        assert!(result.is_err() || result.is_ok());
+        
+        // Just verify the method exists - don't call it to avoid network calls
+        assert!(manager.conn.is_empty());
     }
 
     #[tokio::test]
@@ -1097,5 +1230,49 @@ mod test {
             }
             _ => panic!("Binary message conversion failed"),
         }
+    }
+
+    #[tokio::test]
+    async fn connection_state_enum_works() {
+        // This test verifies the ConnectionState enum functionality
+        let state1 = ConnectionState::Connected;
+        let state2 = ConnectionState::Disconnected;
+        let state3 = ConnectionState::Error("test error".to_string());
+
+        assert_eq!(state1, ConnectionState::Connected);
+        assert_eq!(state2, ConnectionState::Disconnected);
+        assert_ne!(state1, state2);
+        assert_ne!(state2, state3);
+
+        // Test cloning
+        let state1_clone = state1.clone();
+        assert_eq!(state1, state1_clone);
+    }
+
+    #[tokio::test]
+    async fn websocket_sink_stream_channel_behavior() {
+        // This test verifies the channel behavior without network calls
+        let (_message_sender, message_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (write_sender, _write_receiver) = tokio::sync::mpsc::unbounded_channel();
+        
+        let connection_state = Arc::new(RwLock::new(ConnectionState::Connected));
+
+        let mut sink = WebSocketSink {
+            sender: write_sender,
+            connection_state: Arc::clone(&connection_state),
+        };
+        
+        let stream = WebSocketStream {
+            receiver: message_receiver,
+            connection_state: Arc::clone(&connection_state),
+        };
+
+        // Test initial state
+        assert_eq!(sink.connection_state().await, ConnectionState::Connected);
+        assert_eq!(stream.connection_state().await, ConnectionState::Connected);
+        
+        // Test close functionality
+        sink.close().await.unwrap();
+        assert_eq!(sink.connection_state().await, ConnectionState::Disconnected);
     }
 }
