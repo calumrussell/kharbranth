@@ -179,19 +179,9 @@ where
         tokio::spawn(async move {
             loop {
                 {
-                    let tracker = ping_tracker_clone.read().await;
+                    let mut tracker = ping_tracker_clone.write().await;
                     tracker.check_timeout()?;
 
-                    if !tracker.should_send_ping() {
-                        drop(tracker);
-                        sleep(Duration::from_secs(ping_duration_clone)).await;
-                        continue;
-                    }
-                }
-
-                {
-                    let mut tracker = ping_tracker_clone.write().await;
-                    // Double-check in case state changed
                     if tracker.should_send_ping() {
                         // Create unique payload using current timestamp
                         let timestamp = SystemTime::now()
@@ -206,6 +196,7 @@ where
                         if let Err(e) = write_lock.send(Message::Ping(payload.into())).await {
                             return Err(anyhow!(ConnectionError::PingFailed(e.to_string())));
                         }
+                        debug!("Ping sent with timestamp payload");
                     }
                 }
                 sleep(Duration::from_secs(ping_duration_clone)).await;
