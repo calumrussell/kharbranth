@@ -518,6 +518,7 @@ mod test {
     use tokio_tungstenite::WebSocketStream;
 
     use crate::{Config, Connection, ReadHooks, SimplePingTracker, WSManager};
+    use tokio_tungstenite::tungstenite::Message;
 
     async fn setup(mock: Mock) -> Connection<Mock> {
         let ws_stream = WebSocketStream::from_raw_socket(
@@ -746,6 +747,66 @@ mod test {
         sleep(Duration::from_millis(2)).await;
         assert!(short_timeout_tracker.check_timeout().is_err());
         assert!(!short_timeout_tracker.should_send_ping());
+    }
+
+    #[tokio::test]
+    async fn uninitialized_connection_write_returns_error() {
+        // This test verifies that calling write on an uninitialized connection returns proper error
+        let config = Config {
+            ping_duration: 10,
+            ping_message: "ping".to_string(),
+            ping_timeout: 15,
+            url: "wss://fake".to_string(),
+            reconnect_timeout: 10,
+            write_on_init: Vec::new(),
+        };
+
+        let hooks = ReadHooks::new();
+        let mut conn: Connection<Mock> = Connection::new(config, hooks);
+
+        let result = conn.write(Message::Text("test".into())).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Connection write stream not initialized"));
+    }
+
+    #[tokio::test]
+    async fn uninitialized_connection_ping_loop_returns_error() {
+        // This test verifies that calling ping_loop on an uninitialized connection returns proper error
+        let config = Config {
+            ping_duration: 10,
+            ping_message: "ping".to_string(),
+            ping_timeout: 15,
+            url: "wss://fake".to_string(),
+            reconnect_timeout: 10,
+            write_on_init: Vec::new(),
+        };
+
+        let hooks = ReadHooks::new();
+        let mut conn: Connection<Mock> = Connection::new(config, hooks);
+
+        let result = conn.ping_loop().await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Connection write stream not initialized for ping loop"));
+    }
+
+    #[tokio::test]
+    async fn uninitialized_connection_read_loop_returns_error() {
+        // This test verifies that calling read_loop on an uninitialized connection returns proper error
+        let config = Config {
+            ping_duration: 10,
+            ping_message: "ping".to_string(),
+            ping_timeout: 15,
+            url: "wss://fake".to_string(),
+            reconnect_timeout: 10,
+            write_on_init: Vec::new(),
+        };
+
+        let hooks = ReadHooks::new();
+        let mut conn: Connection<Mock> = Connection::new(config, hooks);
+
+        let result = conn.read_loop().await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Connection read stream not initialized for read loop"));
     }
 
     #[tokio::test]
