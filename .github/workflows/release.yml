@@ -1,0 +1,94 @@
+name: Create Release
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Extract version from Cargo.toml
+      id: extract_version
+      run: |
+        VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "//; s/"//')
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "tag=v$VERSION" >> $GITHUB_OUTPUT
+
+    - name: Check if tag exists
+      id: check_tag
+      run: |
+        if git tag | grep -q "^v${{ steps.extract_version.outputs.version }}$"; then
+          echo "exists=true" >> $GITHUB_OUTPUT
+        else
+          echo "exists=false" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Run tests
+      if: steps.check_tag.outputs.exists == 'false'
+      run: cargo test
+
+    - name: Build release
+      if: steps.check_tag.outputs.exists == 'false'
+      run: cargo build --release
+
+    - name: Create tag
+      if: steps.check_tag.outputs.exists == 'false'
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git tag ${{ steps.extract_version.outputs.tag }}
+        git push origin ${{ steps.extract_version.outputs.tag }}
+
+    - name: Generate changelog
+      if: steps.check_tag.outputs.exists == 'false'
+      id: changelog
+      run: |
+        # Get commits since last tag or from beginning if no tags
+        LAST_TAG=$(git tag --sort=-version:refname | head -1 2>/dev/null || echo "")
+        if [ -z "$LAST_TAG" ]; then
+          COMMITS=$(git log --pretty=format:"- %s" --no-merges)
+        else
+          COMMITS=$(git log ${LAST_TAG}..HEAD --pretty=format:"- %s" --no-merges)
+        fi
+        
+        if [ -z "$COMMITS" ]; then
+          COMMITS="- Initial release"
+        fi
+        
+        echo "changelog<<EOF" >> $GITHUB_OUTPUT
+        echo "$COMMITS" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+
+    - name: Create Release
+      if: steps.check_tag.outputs.exists == 'false'
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ steps.extract_version.outputs.tag }}
+        release_name: Release ${{ steps.extract_version.outputs.tag }}
+        body: |
+          ## Changes
+          ${{ steps.changelog.outputs.changelog }}
+          
+          ## Installation
+          Add this to your `Cargo.toml`:
+          ```toml
+          [dependencies]
+          kharbranth = "${{ steps.extract_version.outputs.version }}"
+          ```
+        draft: false
+        prerelease: false
+
+    - name: Skip release (tag exists)
+      if: steps.check_tag.outputs.exists == 'true'
+      run: |
+        echo "Tag v${{ steps.extract_version.outputs.version }} already exists, skipping release creation"
