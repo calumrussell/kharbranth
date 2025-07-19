@@ -7,6 +7,10 @@ edition = "2024"
 name = "kharbranth"
 path = "src/lib.rs"
 
+[[bin]]
+name = "test-hyperliquid"
+path = "src/bin/test-hyperliquid.rs"
+
 [dependencies]
 tokio-tungstenite = { version = "0.26.2", features = ["native-tls"] }
 tokio = { version = "1.45.1", features = ["full"] }
