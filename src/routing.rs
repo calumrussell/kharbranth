@@ -2,13 +2,14 @@ use std::{
     sync::{Arc, atomic::{AtomicUsize, AtomicU64, Ordering}},
     future::Future,
     pin::Pin,
+    collections::VecDeque,
 };
 
 use anyhow::Result;
 use dashmap::DashMap;
 use log::{debug, warn};
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, Notify};
 
 pub type SubscriptionId = usize;
 
@@ -126,10 +127,66 @@ impl Default for ConnectionConfig {
     }
 }
 
+struct BackpressureQueue {
+    queue: Arc<Mutex<VecDeque<Arc<str>>>>,
+    notify: Arc<Notify>,
+    capacity: usize,
+    policy: BackpressurePolicy,
+}
+
+impl BackpressureQueue {
+    fn new(capacity: usize, policy: BackpressurePolicy) -> Self {
+        Self {
+            queue: Arc::new(Mutex::new(VecDeque::new())),
+            notify: Arc::new(Notify::new()),
+            capacity,
+            policy,
+        }
+    }
+
+    async fn send(&self, message: Arc<str>) -> Result<bool> {
+        let mut queue = self.queue.lock().await;
+        
+        if queue.len() >= self.capacity {
+            match self.policy {
+                BackpressurePolicy::DropOldest => {
+                    queue.pop_front(); // Remove oldest
+                    queue.push_back(message);
+                    self.notify.notify_one();
+                    Ok(false) // Indicates a message was dropped
+                }
+                BackpressurePolicy::DropNewest => {
+                    // Don't add the new message
+                    Ok(false) // Indicates message was dropped
+                }
+                BackpressurePolicy::FailFast => {
+                    return Err(anyhow::anyhow!("Queue is full"));
+                }
+            }
+        } else {
+            queue.push_back(message);
+            self.notify.notify_one();
+            Ok(true) // Message was successfully queued
+        }
+    }
+
+    async fn recv(&self) -> Option<Arc<str>> {
+        loop {
+            {
+                let mut queue = self.queue.lock().await;
+                if let Some(message) = queue.pop_front() {
+                    return Some(message);
+                }
+            }
+            self.notify.notified().await;
+        }
+    }
+}
+
 struct Subscription {
     id: SubscriptionId,
     handler: Arc<dyn MessageHandler>,
-    sender: mpsc::Sender<Arc<str>>,
+    queue: Arc<BackpressureQueue>,
 }
 
 pub struct ConnectionRouter {
@@ -158,23 +215,30 @@ impl ConnectionRouter {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let handler = Arc::new(handler);
         
-        let (sender, mut receiver) = mpsc::channel::<Arc<str>>(self.config.max_pending_messages);
+        let queue = Arc::new(BackpressureQueue::new(
+            self.config.max_pending_messages,
+            self.config.backpressure_policy,
+        ));
         
         let subscription = Subscription {
             id,
             handler: handler.clone(),
-            sender,
+            queue: Arc::clone(&queue),
         };
         
         self.text_subscriptions.insert(id, subscription);
         
         let stats = Arc::clone(&self.stats);
         tokio::spawn(async move {
-            while let Some(text) = receiver.recv().await {
-                handler.handle_text(text).await;
-                
-                stats.total_processed.fetch_add(1, Ordering::Relaxed);
-                stats.pending.fetch_sub(1, Ordering::Relaxed);
+            loop {
+                if let Some(text) = queue.recv().await {
+                    handler.handle_text(text).await;
+                    
+                    stats.total_processed.fetch_add(1, Ordering::Relaxed);
+                    stats.pending.fetch_sub(1, Ordering::Relaxed);
+                } else {
+                    break;
+                }
             }
             debug!("Text subscription {} handler task completed", id);
         });
@@ -190,19 +254,26 @@ impl ConnectionRouter {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let handler = Arc::new(handler);
         
-        let (sender, mut receiver) = mpsc::channel::<Arc<str>>(100);
+        let queue = Arc::new(BackpressureQueue::new(
+            100, // Connection events use smaller queue
+            self.config.backpressure_policy,
+        ));
         
         let subscription = Subscription {
             id,
             handler: handler.clone(),
-            sender,
+            queue: Arc::clone(&queue),
         };
         
         self.connection_event_subscriptions.insert(id, subscription);
         
         tokio::spawn(async move {
-            while let Some(event_json) = receiver.recv().await {
-                handler.handle_text(event_json).await;
+            loop {
+                if let Some(event_json) = queue.recv().await {
+                    handler.handle_text(event_json).await;
+                } else {
+                    break;
+                }
             }
             debug!("Connection event subscription {} handler task completed", id);
         });
@@ -227,29 +298,18 @@ impl ConnectionRouter {
         for entry in self.text_subscriptions.iter() {
             let subscription = entry.value();
             
-            match subscription.sender.try_send(Arc::clone(&shared_text)) {
-                Ok(_) => {
+            match subscription.queue.send(Arc::clone(&shared_text)).await {
+                Ok(true) => {
                     _messages_sent += 1;
                     self.stats.pending.fetch_add(1, Ordering::Relaxed);
                 }
-                Err(mpsc::error::TrySendError::Full(_)) => {
-                    match self.config.backpressure_policy {
-                        BackpressurePolicy::DropOldest => {
-                            warn!("Message queue full for subscription {}, dropping newest message", subscription.id);
-                            messages_dropped += 1;
-                        }
-                        BackpressurePolicy::DropNewest => {
-                            warn!("Message queue full for subscription {}, dropping newest message", subscription.id);
-                            messages_dropped += 1;
-                        }
-                        BackpressurePolicy::FailFast => {
-                            return Err(anyhow::anyhow!("Message queue full for subscription {}, failing fast", subscription.id));
-                        }
-                    }
+                Ok(false) => {
+                    // Message was dropped due to backpressure policy
+                    messages_dropped += 1;
+                    warn!("Message dropped for subscription {} due to backpressure", subscription.id);
                 }
-                Err(mpsc::error::TrySendError::Closed(_)) => {
-                    debug!("Subscription {} channel closed, removing", subscription.id);
-                    self.text_subscriptions.remove(&subscription.id);
+                Err(e) => {
+                    return Err(e);
                 }
             }
         }
@@ -269,16 +329,15 @@ impl ConnectionRouter {
         for entry in self.connection_event_subscriptions.iter() {
             let subscription = entry.value();
             
-            match subscription.sender.try_send(Arc::clone(&shared_event)) {
-                Ok(_) => {
+            match subscription.queue.send(Arc::clone(&shared_event)).await {
+                Ok(true) => {
                     debug!("Sent connection event to subscription {}", subscription.id);
                 }
-                Err(mpsc::error::TrySendError::Full(_)) => {
-                    warn!("Connection event queue full for subscription {}, dropping event", subscription.id);
+                Ok(false) => {
+                    warn!("Connection event dropped for subscription {} due to backpressure", subscription.id);
                 }
-                Err(mpsc::error::TrySendError::Closed(_)) => {
-                    debug!("Connection event subscription {} channel closed, removing", subscription.id);
-                    self.connection_event_subscriptions.remove(&subscription.id);
+                Err(e) => {
+                    return Err(e);
                 }
             }
         }
