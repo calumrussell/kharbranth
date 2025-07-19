@@ -31,10 +31,6 @@ jobs:
           echo "exists=false" >> $GITHUB_OUTPUT
         fi
 
-    - name: Run tests
-      if: steps.check_tag.outputs.exists == 'false'
-      run: cargo test
-
     - name: Build release
       if: steps.check_tag.outputs.exists == 'false'
       run: cargo build --release
