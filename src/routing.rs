@@ -10,10 +10,8 @@ use log::{debug, warn};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
-/// Unique identifier for a subscription
 pub type SubscriptionId = usize;
 
-/// Types of messages that can be subscribed to
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SubscriptionType {
     TextMessages,
@@ -22,7 +20,6 @@ pub enum SubscriptionType {
     ErrorEvents,
 }
 
-/// Connection state events that subscribers can receive
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ConnectionEvent {
     Connected,
@@ -31,7 +28,6 @@ pub enum ConnectionEvent {
     Error(String),
 }
 
-/// Error events for connection issues
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ErrorEvent {
     PingTimeout,
@@ -40,14 +36,9 @@ pub enum ErrorEvent {
     ConnectionDropped,
 }
 
-/// Simple message handler trait - takes just a string for simplicity
-/// This maintains the abstraction by hiding WebSocket Message types completely
 pub trait MessageHandler: Send + Sync {
-    /// Handle a text message - this is the main use case for crypto exchanges
     fn handle_text(&self, message: &str) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
-}
-
-/// Convenience handler for simple async functions  
+}  
 pub struct AsyncHandler<F, Fut>
 where
     F: Fn(String) -> Fut + Send + Sync,
@@ -76,18 +67,13 @@ where
     }
 }
 
-/// Backpressure policies for handling message queue overflow
 #[derive(Debug, Clone, Copy)]
 pub enum BackpressurePolicy {
-    /// Drop the oldest messages when queue is full
     DropOldest,
-    /// Drop the newest message when queue is full
     DropNewest,
-    /// Fail fast with an error when queue is full
     FailFast,
 }
 
-/// Statistics about message processing
 #[derive(Debug, Clone)]
 pub struct QueueStats {
     pub pending: usize,
@@ -96,7 +82,6 @@ pub struct QueueStats {
     pub total_processed: u64,
 }
 
-/// Configuration for connection-specific message handling
 #[derive(Debug, Clone)]
 pub struct ConnectionConfig {
     pub backpressure_policy: BackpressurePolicy,
@@ -114,13 +99,11 @@ impl Default for ConnectionConfig {
     }
 }
 
-/// A single subscription entry
 struct Subscription {
     id: SubscriptionId,
     handler: Arc<dyn MessageHandler>,
 }
 
-/// Per-connection message router - handles subscriptions for a single connection
 pub struct ConnectionRouter {
     text_subscriptions: Arc<DashMap<SubscriptionId, Subscription>>,
     connection_event_subscriptions: Arc<DashMap<SubscriptionId, Subscription>>,
@@ -145,7 +128,6 @@ impl ConnectionRouter {
         }
     }
 
-    /// Subscribe to text messages from this connection
     pub async fn subscribe_text<H>(&self, handler: H) -> Result<SubscriptionId>
     where
         H: MessageHandler + 'static,
@@ -160,7 +142,6 @@ impl ConnectionRouter {
         Ok(id)
     }
 
-    /// Subscribe to connection events from this connection
     pub async fn subscribe_connection_events<H>(&self, handler: H) -> Result<SubscriptionId>
     where
         H: MessageHandler + 'static,
@@ -175,19 +156,16 @@ impl ConnectionRouter {
         Ok(id)
     }
 
-    /// Unsubscribe from a specific subscription
     pub fn unsubscribe(&self, subscription_id: SubscriptionId) -> bool {
         let removed_text = self.text_subscriptions.remove(&subscription_id).is_some();
         let removed_connection = self.connection_event_subscriptions.remove(&subscription_id).is_some();
         removed_text || removed_connection
     }
 
-    /// Route a text message to all text subscribers
     pub async fn route_text_message(&self, text: &str) -> Result<()> {
         let mut stats_guard = self.stats.write().await;
         stats_guard.total_received += 1;
 
-        // Check backpressure
         if stats_guard.pending >= self.config.max_pending_messages {
             match self.config.backpressure_policy {
                 BackpressurePolicy::DropOldest | BackpressurePolicy::DropNewest => {
@@ -201,7 +179,6 @@ impl ConnectionRouter {
             }
         }
 
-        // Send to all text subscribers
         let mut futures = Vec::new();
         for entry in self.text_subscriptions.iter() {
             let handler = Arc::clone(&entry.value().handler);
@@ -216,11 +193,9 @@ impl ConnectionRouter {
         stats_guard.pending += futures_count;
         drop(stats_guard);
 
-        // Execute all handlers concurrently
         if !futures.is_empty() {
             futures_util::future::join_all(futures).await;
             
-            // Update processed count
             let mut stats_guard = self.stats.write().await;
             stats_guard.total_processed += futures_count as u64;
             stats_guard.pending = stats_guard.pending.saturating_sub(futures_count);
@@ -229,9 +204,7 @@ impl ConnectionRouter {
         Ok(())
     }
 
-    /// Route a connection event to all connection event subscribers
     pub async fn route_connection_event(&self, event: ConnectionEvent) -> Result<()> {
-        // For now, connection events can be represented as JSON strings
         let event_json = serde_json::to_string(&event)
             .map_err(|e| anyhow::anyhow!("Failed to serialize connection event: {}", e))?;
 
@@ -245,7 +218,6 @@ impl ConnectionRouter {
             futures.push(future);
         }
 
-        // Execute all handlers concurrently
         if !futures.is_empty() {
             futures_util::future::join_all(futures).await;
         }
@@ -253,12 +225,10 @@ impl ConnectionRouter {
         Ok(())
     }
 
-    /// Get current queue statistics
     pub async fn get_stats(&self) -> QueueStats {
         self.stats.read().await.clone()
     }
 
-    /// Get the number of active subscriptions
     pub fn subscription_count(&self) -> usize {
         self.text_subscriptions.len() + self.connection_event_subscriptions.len()
     }

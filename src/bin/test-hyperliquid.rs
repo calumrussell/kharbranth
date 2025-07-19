@@ -28,7 +28,7 @@ async fn main() -> Result<()> {
     info!("Starting Hyperliquid WebSocket test");
 
     let manager = WSManager::new();
-    let hooks = ReadHooks::new(); // Empty hooks for backward compatibility
+    let hooks = ReadHooks::new();
 
     let subscription = HyperliquidSubscriptionMessage {
         typ: "candle".to_string(),
@@ -54,16 +54,14 @@ async fn main() -> Result<()> {
 
     manager.new_conn("hyperliquid", config, hooks).await;
 
-    // Subscribe to text messages using the new enhanced routing API
     let _text_subscription = manager.subscribe("hyperliquid", AsyncHandler::new(|text| async move {
         info!("Received candle data: {}", text);
-        // Process the candle data here
         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
             info!("Parsed JSON: {}", parsed);
         }
     })).await?;
 
-    // Subscribe to connection events  
+  
     let _event_subscription = manager.subscribe_connection_events("hyperliquid", AsyncHandler::new(|event| async move {
         info!("Connection event: {}", event);
     })).await?;
@@ -71,7 +69,6 @@ async fn main() -> Result<()> {
     let (tx, _rx) = broadcast::channel(16);
     let _handles = manager.start(tx.clone());
 
-    // Monitor connection statistics
     let manager_clone = manager.clone();
     tokio::spawn(async move {
         loop {
@@ -83,7 +80,6 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Send restart message every 20 seconds to test reconnection logic
     let tx_clone = tx.clone();
     tokio::spawn(async move {
         loop {
@@ -91,7 +87,7 @@ async fn main() -> Result<()> {
             info!("Sending restart signal to hyperliquid connection");
             if let Err(e) = tx_clone.send(kharbranth::BroadcastMessage {
                 target: "hyperliquid".to_string(),
-                action: 0, // Restart action
+                action: 0,
             }) {
                 info!("Failed to send restart signal: {}", e);
             }

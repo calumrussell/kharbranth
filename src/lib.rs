@@ -194,7 +194,6 @@ where
                     tracker.check_timeout()?;
 
                     if tracker.should_send_ping() {
-                        // Create unique payload using current timestamp
                         let timestamp = SystemTime::now()
                             .duration_since(SystemTime::UNIX_EPOCH)
                             .map_err(|e| anyhow!("System time error: {}", e))?
@@ -237,11 +236,9 @@ where
                         match received {
                             Ok(msg) => match msg {
                                 Message::Text(text) => {
-                                    // Handle with traditional hooks
                                     if let Some(on_text_func) = on_text_clone.as_ref() {
                                         on_text_func(text.clone());
                                     }
-                                    // Route through new subscription system if available
                                     if let Some(ref router) = router_clone {
                                         if let Err(e) = router.route_text_message(&text).await {
                                             error!("Failed to route text message: {}", e);
@@ -272,7 +269,6 @@ where
                                     if let Some(on_close_func) = on_close_clone.as_ref() {
                                         on_close_func(maybe_frame);
                                     }
-                                    // Route disconnection event
                                     if let Some(ref router) = router_clone {
                                         if let Err(e) = router.route_connection_event(routing::ConnectionEvent::Disconnected).await {
                                             error!("Failed to route connection event: {}", e);
@@ -337,7 +333,6 @@ impl Connection<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
                 self.read = Some(Arc::new(Mutex::new(read)));
                 self.write = Some(Arc::new(Mutex::new(write)));
 
-                // Reset ping tracker for new connection
                 {
                     let mut tracker = self.ping_tracker.write().await;
                     *tracker =
@@ -352,7 +347,6 @@ impl Connection<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
                 for message in self.config.write_on_init.clone() {
                     if let Err(e) = self.write(message).await {
                         error!("Failed to send initialization message: {}", e);
-                        // Continue with other messages rather than failing the entire connection
                     }
                 }
 
@@ -430,13 +424,10 @@ impl WSManager {
     }
 
     pub async fn new_conn_with_router_config(&self, name: &str, config: Config, hooks: ReadHooks, router_config: routing::ConnectionConfig) {
-        // Create router for this connection
         let router = Arc::new(routing::ConnectionRouter::new(router_config));
         
-        // Create connection with router attached
         let conn = Connection::new_with_router(config, hooks, Arc::clone(&router));
 
-        // Store both connection and router
         self.conn
             .insert(name.to_string(), Arc::new(RwLock::new(conn)));
         self.routers
@@ -553,7 +544,6 @@ impl WSManager {
         )))
     }
 
-    /// Subscribe to text messages from a specific connection
     pub async fn subscribe<H>(&self, connection_name: &str, handler: H) -> Result<SubscriptionId>
     where
         H: MessageHandler + 'static,
@@ -563,7 +553,6 @@ impl WSManager {
         router.subscribe_text(handler).await
     }
 
-    /// Subscribe to connection events from a specific connection
     pub async fn subscribe_connection_events<H>(&self, connection_name: &str, handler: H) -> Result<SubscriptionId>
     where
         H: MessageHandler + 'static,
@@ -573,7 +562,6 @@ impl WSManager {
         router.subscribe_connection_events(handler).await
     }
 
-    /// Unsubscribe from a specific subscription
     pub fn unsubscribe(&self, connection_name: &str, subscription_id: SubscriptionId) -> Result<()> {
         let router = self.routers.get(connection_name)
             .ok_or_else(|| anyhow!("Connection '{}' not found", connection_name))?;
@@ -585,14 +573,12 @@ impl WSManager {
         }
     }
 
-    /// Get queue statistics for a specific connection
     pub async fn get_connection_stats(&self, connection_name: &str) -> Result<QueueStats> {
         let router = self.routers.get(connection_name)
             .ok_or_else(|| anyhow!("Connection '{}' not found", connection_name))?;
         Ok(router.get_stats().await)
     }
 
-    /// Get statistics for all connections
     pub async fn get_all_stats(&self) -> HashMap<String, QueueStats> {
         let mut result = HashMap::new();
         for entry in self.routers.iter() {
@@ -604,11 +590,7 @@ impl WSManager {
         result
     }
 
-    /// Configure backpressure settings for a specific connection
     pub async fn configure_connection(&self, _connection_name: &str, _config: ConnectionConfig) -> Result<()> {
-        // For now, we can't change the configuration of an existing router
-        // This would require rebuilding the router, which is complex
-        // We'll add this as a future enhancement
         Err(anyhow!("Dynamic configuration not yet supported. Please recreate the connection with the desired configuration."))
     }
 }
@@ -710,7 +692,7 @@ mod test {
 
     #[tokio::test]
     async fn concurrent_write_to_different_connections() {
-        // This test verifies that DashMap allows concurrent writes to different connections without blocking
+        // This test verifies        // This test verifies that DashMap allows concurrent writes to different connections without blocking
         let manager = WSManager::new();
 
         for i in 0..10 {
@@ -746,7 +728,7 @@ mod test {
 
     #[tokio::test]
     async fn ping_tracker_timeout_after_stale_state() {
-        // This test verifies that check_timeout properly detects when a ping has timed out
+        // This test verifies        // This test verifies that check_timeout properly detects when a ping has timed out
         use tokio::time::{Duration, sleep};
 
         let timeout_duration = Duration::from_secs(1);
@@ -1018,7 +1000,6 @@ mod test {
 
     #[tokio::test]
     async fn test_subscription_api() {
-        // This test verifies the new subscription-based message routing system
         use std::sync::atomic::{AtomicUsize, Ordering};
         use tokio::time::Duration;
 
@@ -1464,7 +1445,7 @@ mod test {
         let events = received_events.lock().await;
         assert_eq!(events.len(), 4);
 
-        // Check that events can be deserialized back
+        // Check        // This test verifies that events can be deserialized back
         for event_json in events.iter() {
             let parsed: Result<crate::routing::ConnectionEvent, _> = serde_json::from_str(event_json);
             assert!(parsed.is_ok(), "Failed to parse event: {}", event_json);
