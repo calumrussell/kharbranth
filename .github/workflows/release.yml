@@ -11,6 +11,7 @@ jobs:
     - uses: actions/checkout@v4
       with:
         fetch-depth: 0
+        token: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
@@ -35,14 +36,6 @@ jobs:
       if: steps.check_tag.outputs.exists == 'false'
       run: cargo build --release
 
-    - name: Create tag
-      if: steps.check_tag.outputs.exists == 'false'
-      run: |
-        git config user.name "github-actions[bot]"
-        git config user.email "github-actions[bot]@users.noreply.github.com"
-        git tag ${{ steps.extract_version.outputs.tag }}
-        git push origin ${{ steps.extract_version.outputs.tag }}
-
     - name: Generate changelog
       if: steps.check_tag.outputs.exists == 'false'
       id: changelog
@@ -65,12 +58,10 @@ jobs:
 
     - name: Create Release
       if: steps.check_tag.outputs.exists == 'false'
-      uses: actions/create-release@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      uses: softprops/action-gh-release@v1
       with:
         tag_name: ${{ steps.extract_version.outputs.tag }}
-        release_name: Release ${{ steps.extract_version.outputs.tag }}
+        name: Release ${{ steps.extract_version.outputs.tag }}
         body: |
           ## Changes
           ${{ steps.changelog.outputs.changelog }}
@@ -83,6 +74,8 @@ jobs:
           ```
         draft: false
         prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Skip release (tag exists)
       if: steps.check_tag.outputs.exists == 'true'
