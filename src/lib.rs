@@ -196,7 +196,6 @@ where
                         if let Err(e) = write_lock.send(Message::Ping(payload.into())).await {
                             return Err(anyhow!(ConnectionError::PingFailed(e.to_string())));
                         }
-                        debug!("Ping sent with timestamp payload");
                     }
                 }
                 sleep(Duration::from_secs(ping_duration_clone)).await;
