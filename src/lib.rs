@@ -664,6 +664,80 @@ mod test {
     }
 
     #[tokio::test]
+    async fn test_ping_pong_correlation() {
+        // This test verifies ping/pong correlation scenarios including valid responses,
+        // payload mismatches, and unsolicited pongs per RFC 6455
+        let mut tracker = SimplePingTracker::new(Duration::from_secs(10));
+
+        assert!(tracker.should_send_ping());
+
+        let payload1 = vec![1, 2, 3, 4];
+        tracker.send_ping(payload1.clone());
+        assert!(!tracker.should_send_ping());
+        assert!(tracker.handle_pong(payload1).is_ok());
+        assert!(tracker.should_send_ping());
+
+        let payload2 = vec![5, 6, 7, 8];
+        let wrong_payload = vec![9, 10, 11, 12];
+        tracker.send_ping(payload2.clone());
+        assert!(tracker.handle_pong(wrong_payload).is_ok());
+        assert!(!tracker.should_send_ping());
+
+        assert!(tracker.handle_pong(payload2).is_ok());
+        assert!(tracker.should_send_ping());
+
+        assert!(tracker.handle_pong(vec![13, 14, 15]).is_ok());
+        assert!(tracker.should_send_ping());
+
+        for i in 0..5 {
+            assert!(tracker.handle_pong(vec![i]).is_ok());
+        }
+        assert!(tracker.should_send_ping());
+    }
+
+    #[tokio::test]
+    async fn test_ping_tracker_edge_cases() {
+        // This test covers edge cases including boundary timeouts, rapid cycles,
+        // various payload sizes, and state consistency after timeouts
+        use tokio::time::{sleep, Duration};
+
+        let mut tracker = SimplePingTracker::new(Duration::from_millis(1));
+        tracker.send_ping(vec![1]);
+        sleep(Duration::from_millis(2)).await;
+        assert!(tracker.check_timeout().is_err());
+
+        let mut tracker = SimplePingTracker::new(Duration::from_secs(10));
+        for i in 0..100 {
+            let payload = vec![i];
+            tracker.send_ping(payload.clone());
+            assert!(tracker.handle_pong(payload).is_ok());
+            assert!(tracker.should_send_ping());
+        }
+
+        let mut tracker = SimplePingTracker::new(Duration::from_secs(10));
+
+        tracker.send_ping(vec![]);
+        assert!(tracker.handle_pong(vec![]).is_ok());
+        assert!(tracker.should_send_ping());
+
+        let large_payload = vec![42; 1000];
+        tracker.send_ping(large_payload.clone());
+        assert!(tracker.handle_pong(large_payload).is_ok());
+        assert!(tracker.should_send_ping());
+
+        let max_payload = vec![255; 125];
+        tracker.send_ping(max_payload.clone());
+        assert!(tracker.handle_pong(max_payload).is_ok());
+        assert!(tracker.should_send_ping());
+
+        let mut short_timeout_tracker = SimplePingTracker::new(Duration::from_millis(1));
+        short_timeout_tracker.send_ping(vec![1, 2, 3]);
+        sleep(Duration::from_millis(2)).await;
+        assert!(short_timeout_tracker.check_timeout().is_err());
+        assert!(!short_timeout_tracker.should_send_ping());
+    }
+
+    #[tokio::test]
     async fn ping_tracker_resets_on_reconnection() {
         // This test verifies that the ping tracker is reset when a new connection is established,
         // preventing stale ping state from causing immediate timeouts on reconnection
