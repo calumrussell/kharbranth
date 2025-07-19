@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     sync::Arc,
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
 use anyhow::{Error, Result, anyhow};
@@ -60,6 +60,51 @@ impl Default for ReadHooks {
     }
 }
 
+struct SimplePingTracker {
+    last_ping_sent: Option<(Instant, Vec<u8>)>,
+    timeout: Duration,
+}
+
+impl SimplePingTracker {
+    fn new(timeout: Duration) -> Self {
+        Self {
+            last_ping_sent: None,
+            timeout,
+        }
+    }
+
+    fn should_send_ping(&self) -> bool {
+        self.last_ping_sent.is_none()
+    }
+
+    fn send_ping(&mut self, payload: Vec<u8>) -> Vec<u8> {
+        self.last_ping_sent = Some((Instant::now(), payload.clone()));
+        payload
+    }
+
+    fn handle_pong(&mut self, payload: Vec<u8>) -> Result<(), Error> {
+        match &self.last_ping_sent {
+            Some((_, expected_payload)) if expected_payload == &payload => {
+                self.last_ping_sent = None;
+                Ok(())
+            }
+            _ => {
+                log::warn!("Pong payload mismatch or unexpected pong");
+                Err(anyhow!(ConnectionError::PongReceiveTimeout))
+            }
+        }
+    }
+
+    fn check_timeout(&self) -> Result<(), Error> {
+        if let Some((sent_time, _)) = &self.last_ping_sent {
+            if Instant::now() - *sent_time > self.timeout {
+                return Err(anyhow!(ConnectionError::PongReceiveTimeout));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 pub enum ConnectionError {
     PingFailed(String),
@@ -106,6 +151,7 @@ pub struct Connection<S> {
     pub read: Option<ReadStream<S>>,
     pub write: Option<WriteStream<S>>,
     pub hooks: ReadHooks,
+    ping_tracker: Arc<Mutex<SimplePingTracker>>,
 }
 
 impl<S> Connection<S>
@@ -123,18 +169,35 @@ where
 
     async fn ping_loop(&mut self) -> JoinHandle<ConnectionResult> {
         let write_clone = Arc::clone(self.write.as_ref().unwrap());
-        let ping_message_clone = self.config.ping_message.clone().into_bytes();
+        let ping_tracker_clone = Arc::clone(&self.ping_tracker);
         let ping_duration_clone = self.config.ping_duration;
 
         tokio::spawn(async move {
             loop {
                 {
-                    let mut write_lock = write_clone.lock().await;
-                    if let Err(e) = write_lock
-                        .send(Message::Ping(ping_message_clone.clone().into()))
-                        .await
-                    {
-                        return Err(anyhow!(ConnectionError::PingFailed(e.to_string())));
+                    let mut tracker = ping_tracker_clone.lock().await;
+
+                    // Check for timeout first
+                    if let Err(e) = tracker.check_timeout() {
+                        return Err(e);
+                    }
+
+                    // Only send ping if none is outstanding
+                    if tracker.should_send_ping() {
+                        // Create unique payload using current timestamp
+                        let timestamp = SystemTime::now()
+                            .duration_since(SystemTime::UNIX_EPOCH)
+                            .unwrap()
+                            .as_nanos()
+                            .to_le_bytes()
+                            .to_vec();
+                        let payload = tracker.send_ping(timestamp);
+
+                        let mut write_lock = write_clone.lock().await;
+                        if let Err(e) = write_lock.send(Message::Ping(payload.into())).await {
+                            return Err(anyhow!(ConnectionError::PingFailed(e.to_string())));
+                        }
+                        debug!("Ping sent with timestamp payload");
                     }
                 }
                 sleep(Duration::from_secs(ping_duration_clone)).await;
@@ -144,8 +207,7 @@ where
 
     async fn read_loop(&mut self) -> JoinHandle<ConnectionResult> {
         let read_clone = Arc::clone(self.read.as_ref().unwrap());
-        let ping_duration_clone = self.config.ping_duration;
-        let mut last_pong = SystemTime::now();
+        let ping_tracker_clone = Arc::clone(&self.ping_tracker);
 
         let on_text_clone = Arc::clone(&self.hooks.on_text);
         let on_binary_clone = Arc::clone(&self.hooks.on_binary);
@@ -153,16 +215,9 @@ where
         let on_pong_clone = Arc::clone(&self.hooks.on_pong);
         let on_close_clone = Arc::clone(&self.hooks.on_close);
         let on_frame_clone = Arc::clone(&self.hooks.on_frame);
+
         tokio::spawn(async move {
             loop {
-                if SystemTime::now()
-                    > last_pong
-                        .checked_add(Duration::from_secs(ping_duration_clone + 5))
-                        .unwrap()
-                {
-                    return Err(anyhow!(ConnectionError::PongReceiveTimeout));
-                }
-
                 let mut read_lock = read_clone.lock().await;
                 match read_lock.next().await {
                     Some(recieved) => {
@@ -185,10 +240,19 @@ where
                                     }
                                 }
                                 Message::Pong(pong) => {
+                                    // Call user hook first
                                     if let Some(on_pong_func) = on_pong_clone.as_ref() {
-                                        on_pong_func(pong);
+                                        on_pong_func(pong.clone());
                                     }
-                                    last_pong = SystemTime::now();
+
+                                    // Validate pong against outstanding ping
+                                    {
+                                        let mut tracker = ping_tracker_clone.lock().await;
+                                        if let Err(e) = tracker.handle_pong(pong.to_vec()) {
+                                            return Err(e);
+                                        }
+                                        debug!("Valid pong received, ping acknowledged");
+                                    }
                                 }
                                 Message::Close(maybe_frame) => {
                                     if let Some(on_close_func) = on_close_clone.as_ref() {
@@ -214,11 +278,13 @@ where
     }
 
     pub fn new(config: Config, hooks: ReadHooks) -> Self {
+        let ping_timeout = Duration::from_secs(config.ping_timeout);
         Self {
             config,
             read: None,
             write: None,
             hooks,
+            ping_tracker: Arc::new(Mutex::new(SimplePingTracker::new(ping_timeout))),
         }
     }
 }
@@ -246,11 +312,9 @@ impl Connection<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
 
                 Ok((read_loop, ping_loop))
             }
-            Err(e) => {
-                Err(anyhow!(ConnectionError::ConnectionInitFailed(
-                    e.to_string()
-                )))
-            }
+            Err(e) => Err(anyhow!(ConnectionError::ConnectionInitFailed(
+                e.to_string()
+            ))),
         }
     }
 }
@@ -259,6 +323,7 @@ pub struct Config {
     pub url: String,
     pub ping_duration: u64,
     pub ping_message: String,
+    pub ping_timeout: u64,
     pub reconnect_timeout: u64,
     pub write_on_init: Vec<Message>,
 }
@@ -312,12 +377,7 @@ impl WSManager {
     }
 
     pub async fn new_conn(&self, name: &str, config: Config, hooks: ReadHooks) {
-        let conn = Connection {
-            config,
-            read: None,
-            write: None,
-            hooks,
-        };
+        let conn = Connection::new(config, hooks);
 
         self.conn
             .insert(name.to_string(), Arc::new(RwLock::new(conn)));
@@ -458,6 +518,7 @@ mod test {
         let config = Config {
             ping_duration: 10,
             ping_message: "ping".to_string(),
+            ping_timeout: 15,
             url: "wss://fake".to_string(),
             reconnect_timeout: 10,
             write_on_init,
@@ -467,12 +528,9 @@ mod test {
 
         let hooks = ReadHooks::new();
 
-        let conn = Connection {
-            config: config,
-            write: Some(Arc::new(Mutex::new(sink))),
-            read: Some(Arc::new(Mutex::new(stream))),
-            hooks,
-        };
+        let mut conn = Connection::new(config, hooks);
+        conn.write = Some(Arc::new(Mutex::new(sink)));
+        conn.read = Some(Arc::new(Mutex::new(stream)));
         return conn;
     }
 
@@ -505,6 +563,7 @@ mod test {
                 let config = Config {
                     ping_duration: 10,
                     ping_message: "ping".to_string(),
+                    ping_timeout: 15,
                     url: format!("wss://fake{}.com", i),
                     reconnect_timeout: 10,
                     write_on_init: Vec::new(),
@@ -540,6 +599,7 @@ mod test {
             let config = Config {
                 ping_duration: 10,
                 ping_message: "ping".to_string(),
+                ping_timeout: 15,
                 url: format!("wss://fake{}.com", i),
                 reconnect_timeout: 10,
                 write_on_init: Vec::new(),
@@ -581,6 +641,7 @@ mod test {
             let config = Config {
                 ping_duration: 10,
                 ping_message: "ping".to_string(),
+                ping_timeout: 15,
                 url: format!("wss://fake{}.com", i),
                 reconnect_timeout: 10,
                 write_on_init: Vec::new(),
@@ -617,6 +678,7 @@ mod test {
                 let config = Config {
                     ping_duration: 10,
                     ping_message: "ping".to_string(),
+                    ping_timeout: 15,
                     url: format!("wss://fake{}.com", i),
                     reconnect_timeout: 10,
                     write_on_init: Vec::new(),
