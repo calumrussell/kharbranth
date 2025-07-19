@@ -8,7 +8,7 @@ use anyhow::Result;
 use dashmap::DashMap;
 use log::{debug, warn};
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, mpsc};
 
 pub type SubscriptionId = usize;
 
@@ -102,6 +102,7 @@ impl Default for ConnectionConfig {
 struct Subscription {
     id: SubscriptionId,
     handler: Arc<dyn MessageHandler>,
+    sender: mpsc::Sender<String>,
 }
 
 pub struct ConnectionRouter {
@@ -133,11 +134,30 @@ impl ConnectionRouter {
         H: MessageHandler + 'static,
     {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let handler = Arc::new(handler);
+        
+        let (sender, mut receiver) = mpsc::channel(self.config.max_pending_messages);
+        
         let subscription = Subscription {
             id,
-            handler: Arc::new(handler),
+            handler: handler.clone(),
+            sender,
         };
+        
         self.text_subscriptions.insert(id, subscription);
+        
+        let stats = Arc::clone(&self.stats);
+        tokio::spawn(async move {
+            while let Some(text) = receiver.recv().await {
+                handler.handle_text(&text).await;
+                
+                let mut stats_guard = stats.write().await;
+                stats_guard.total_processed += 1;
+                stats_guard.pending = stats_guard.pending.saturating_sub(1);
+            }
+            debug!("Text subscription {} handler task completed", id);
+        });
+        
         debug!("Added text subscription {}", id);
         Ok(id)
     }
@@ -147,11 +167,25 @@ impl ConnectionRouter {
         H: MessageHandler + 'static,
     {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let handler = Arc::new(handler);
+        
+        let (sender, mut receiver) = mpsc::channel(100);
+        
         let subscription = Subscription {
             id,
-            handler: Arc::new(handler),
+            handler: handler.clone(),
+            sender,
         };
+        
         self.connection_event_subscriptions.insert(id, subscription);
+        
+        tokio::spawn(async move {
+            while let Some(event_json) = receiver.recv().await {
+                handler.handle_text(&event_json).await;
+            }
+            debug!("Connection event subscription {} handler task completed", id);
+        });
+        
         debug!("Added connection event subscription {}", id);
         Ok(id)
     }
@@ -165,40 +199,45 @@ impl ConnectionRouter {
     pub async fn route_text_message(&self, text: &str) -> Result<()> {
         let mut stats_guard = self.stats.write().await;
         stats_guard.total_received += 1;
+        drop(stats_guard);
 
-        if stats_guard.pending >= self.config.max_pending_messages {
-            match self.config.backpressure_policy {
-                BackpressurePolicy::DropOldest | BackpressurePolicy::DropNewest => {
-                    warn!("Message queue full, dropping message");
-                    stats_guard.total_dropped += 1;
-                    return Ok(());
+        let mut _messages_sent = 0;
+        let mut messages_dropped = 0;
+
+        for entry in self.text_subscriptions.iter() {
+            let subscription = entry.value();
+            
+            match subscription.sender.try_send(text.to_string()) {
+                Ok(_) => {
+                    _messages_sent += 1;
+                    let mut stats_guard = self.stats.write().await;
+                    stats_guard.pending += 1;
                 }
-                BackpressurePolicy::FailFast => {
-                    return Err(anyhow::anyhow!("Message queue full, failing fast"));
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    match self.config.backpressure_policy {
+                        BackpressurePolicy::DropOldest => {
+                            warn!("Message queue full for subscription {}, dropping newest message", subscription.id);
+                            messages_dropped += 1;
+                        }
+                        BackpressurePolicy::DropNewest => {
+                            warn!("Message queue full for subscription {}, dropping newest message", subscription.id);
+                            messages_dropped += 1;
+                        }
+                        BackpressurePolicy::FailFast => {
+                            return Err(anyhow::anyhow!("Message queue full for subscription {}, failing fast", subscription.id));
+                        }
+                    }
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    debug!("Subscription {} channel closed, removing", subscription.id);
+                    self.text_subscriptions.remove(&subscription.id);
                 }
             }
         }
 
-        let mut futures = Vec::new();
-        for entry in self.text_subscriptions.iter() {
-            let handler = Arc::clone(&entry.value().handler);
-            let text_copy = text.to_string();
-            let future = async move {
-                handler.handle_text(&text_copy).await;
-            };
-            futures.push(future);
-        }
-
-        let futures_count = futures.len();
-        stats_guard.pending += futures_count;
-        drop(stats_guard);
-
-        if !futures.is_empty() {
-            futures_util::future::join_all(futures).await;
-            
+        if messages_dropped > 0 {
             let mut stats_guard = self.stats.write().await;
-            stats_guard.total_processed += futures_count as u64;
-            stats_guard.pending = stats_guard.pending.saturating_sub(futures_count);
+            stats_guard.total_dropped += messages_dropped;
         }
 
         Ok(())
@@ -208,18 +247,21 @@ impl ConnectionRouter {
         let event_json = serde_json::to_string(&event)
             .map_err(|e| anyhow::anyhow!("Failed to serialize connection event: {}", e))?;
 
-        let mut futures = Vec::new();
         for entry in self.connection_event_subscriptions.iter() {
-            let handler = Arc::clone(&entry.value().handler);
-            let event_copy = event_json.clone();
-            let future = async move {
-                handler.handle_text(&event_copy).await;
-            };
-            futures.push(future);
-        }
-
-        if !futures.is_empty() {
-            futures_util::future::join_all(futures).await;
+            let subscription = entry.value();
+            
+            match subscription.sender.try_send(event_json.clone()) {
+                Ok(_) => {
+                    debug!("Sent connection event to subscription {}", subscription.id);
+                }
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    warn!("Connection event queue full for subscription {}, dropping event", subscription.id);
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    debug!("Connection event subscription {} channel closed, removing", subscription.id);
+                    self.connection_event_subscriptions.remove(&subscription.id);
+                }
+            }
         }
 
         Ok(())
