@@ -192,6 +192,7 @@ Follow the existing pattern seen in recent commits:
 - [ ] Documentation updated if needed
 - [ ] Make sure PR does not contain unneeded files
 - [ ] Check for unused code created by this change
+- [ ] Version updated in Cargo.toml
 
 ## Build Configuration
 - Rust 2024 edition
