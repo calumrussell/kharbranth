@@ -88,9 +88,13 @@ impl SimplePingTracker {
                 self.last_ping_sent = None;
                 Ok(())
             }
-            _ => {
-                log::warn!("Pong payload mismatch or unexpected pong");
-                Err(anyhow!(ConnectionError::PongReceiveTimeout))
+            Some(_) => {
+                log::debug!("Pong payload mismatch, ignoring");
+                Ok(())
+            }
+            None => {
+                log::debug!("Unsolicited pong received, ignoring per RFC 6455");
+                Ok(())
             }
         }
     }
@@ -134,7 +138,7 @@ impl std::fmt::Display for ConnectionError {
                 write!(f, "Connection not found: {:?}", name)
             }
             ConnectionError::ConnectionInitFailed(msg) => {
-                write!(f, "Connection intialization failed: {:?}", msg)
+                write!(f, "Connection initialization failed: {:?}", msg)
             }
         }
     }
@@ -224,9 +228,9 @@ where
             loop {
                 let mut read_lock = read_clone.lock().await;
                 match read_lock.next().await {
-                    Some(recieved) => {
-                        debug!("Read: {:?}", &recieved);
-                        match recieved {
+                    Some(received) => {
+                        debug!("Read: {:?}", &received);
+                        match received {
                             Ok(msg) => match msg {
                                 Message::Text(text) => {
                                     if let Some(on_text_func) = on_text_clone.as_ref() {
@@ -649,6 +653,23 @@ mod test {
 
         tracker.handle_pong(payload).unwrap();
         assert!(tracker.check_timeout().is_ok());
+    }
+
+    #[tokio::test]
+    async fn ping_tracker_handles_unsolicited_pongs() {
+        // This test verifies that unsolicited pongs are ignored per RFC 6455
+        let mut tracker = SimplePingTracker::new(Duration::from_secs(15));
+
+        // Handle unsolicited pong - should not error
+        assert!(tracker.handle_pong(vec![1, 2, 3]).is_ok());
+
+        // Send a ping, then handle mismatched pong - should not error
+        tracker.send_ping(vec![4, 5, 6]);
+        assert!(tracker.handle_pong(vec![1, 2, 3]).is_ok());
+
+        // Handle correct pong - should clear state
+        assert!(tracker.handle_pong(vec![4, 5, 6]).is_ok());
+        assert!(tracker.should_send_ping());
     }
 
     #[tokio::test]
