@@ -50,8 +50,13 @@ async fn main() -> Result<()> {
         write_on_init: vec![TungsteniteMessage::Text(subscribe_json.into())],
     };
 
+    manager.new_conn("hyperliquid", config).await;
+
+    let (tx, _rx) = tokio::sync::broadcast::channel(16);
+    let _handles = manager.start(tx.clone());
+
     use futures_util::StreamExt;
-    let (_sink, mut stream) = manager.connect_stream("hyperliquid", config).await?;
+    let (_sink, mut stream) = manager.get_stream("hyperliquid").await?;
     tokio::spawn(async move {
         while let Some(result) = stream.next().await {
             match result {
@@ -72,6 +77,19 @@ async fn main() -> Result<()> {
                     info!("Stream error: {}", e);
                     break;
                 }
+            }
+        }
+    });
+
+    tokio::spawn(async move {
+        loop {
+            sleep(Duration::from_secs(10)).await;
+            info!("Sending restart signal to hyperliquid connection");
+            if let Err(e) = tx.send(kharbranth::BroadcastMessage {
+                target: "hyperliquid".to_string(),
+                action: 0,
+            }) {
+                info!("Failed to send restart signal: {}", e);
             }
         }
     });

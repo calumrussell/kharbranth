@@ -149,7 +149,7 @@ impl From<Message> for TungsteniteMessage {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct WebSocketSink {
     sender: mpsc::UnboundedSender<TungsteniteMessage>,
     connection_state: Arc<RwLock<ConnectionState>>,
@@ -581,6 +581,7 @@ type ConnectionType = Connection<tokio_tungstenite::MaybeTlsStream<tokio::net::T
 
 pub struct WSManager {
     conn: Arc<DashMap<String, Arc<RwLock<ConnectionType>>>>,
+    streams: Arc<DashMap<String, (WebSocketSink, WebSocketStream)>>,
 }
 
 impl Default for WSManager {
@@ -593,6 +594,7 @@ impl Clone for WSManager {
     fn clone(&self) -> Self {
         Self {
             conn: Arc::clone(&self.conn),
+            streams: Arc::clone(&self.streams),
         }
     }
 }
@@ -601,6 +603,7 @@ impl WSManager {
     pub fn new() -> Self {
         Self {
             conn: Arc::new(DashMap::new()),
+            streams: Arc::new(DashMap::new()),
         }
     }
 
@@ -611,26 +614,20 @@ impl WSManager {
             .insert(name.to_string(), Arc::new(RwLock::new(conn)));
     }
 
-    pub async fn connect_stream(
-        &self,
-        name: &str,
-        config: Config,
-    ) -> Result<(WebSocketSink, WebSocketStream), Error> {
-        let mut conn = Connection::new(config);
-        let (read_loop, ping_loop, write_loop, sink, stream) = conn.start_loop().await?;
-
-        self.conn
-            .insert(name.to_string(), Arc::new(RwLock::new(conn)));
-
-        tokio::spawn(async move {
-            tokio::select! {
-                _ = read_loop => {},
-                _ = ping_loop => {},
-                _ = write_loop => {},
+    pub async fn get_stream(&self, name: &str) -> Result<(WebSocketSink, WebSocketStream), Error> {
+        // Wait for the stream to become available (connection to be established)
+        for _ in 0..60 {
+            // Wait up to 60 seconds
+            if let Some((_key, (sink, stream))) = self.streams.remove(name) {
+                return Ok((sink, stream));
             }
-        });
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
 
-        Ok((sink, stream))
+        Err(anyhow!(
+            "Timeout waiting for connection '{}' to be established - check connection logs",
+            name
+        ))
     }
 
     pub fn start(
@@ -645,6 +642,7 @@ impl WSManager {
             let conn_clone: Arc<RwLock<ConnectionType>> = Arc::clone(conn);
             let name_clone = name.clone();
             let tx_clone = tx.clone();
+            let streams_clone = Arc::clone(&self.streams);
             let manager_handle = tokio::spawn(async move {
                 loop {
                     let connection_attempt = {
@@ -670,8 +668,11 @@ impl WSManager {
                             sleep(Duration::from_secs(reconnect_timeout)).await;
                         }
                     } else {
-                        let (read_handle, ping_handle, write_handle, _sink, _stream) =
+                        let (read_handle, ping_handle, write_handle, sink, stream) =
                             connection_attempt.unwrap();
+
+                        // Store the current sink/stream for this connection
+                        streams_clone.insert(name_clone.clone(), (sink, stream));
                         info!("{}: Connected", name_clone);
 
                         let name_clone_two = name_clone.clone();
