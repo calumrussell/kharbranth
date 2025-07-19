@@ -195,7 +195,6 @@ impl WebSocketSink {
     }
 
     pub async fn close(&mut self) -> Result<(), Error> {
-        // Close the sender and update state
         self.sender.closed().await;
         let mut state = self.connection_state.write().await;
         *state = ConnectionState::Disconnected;
@@ -205,17 +204,14 @@ impl WebSocketSink {
 
 impl Drop for WebSocketSink {
     fn drop(&mut self) {
-        // Best-effort cleanup: try to update connection state if runtime is available
         let state_clone = Arc::clone(&self.connection_state);
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            // Spawn a detached task for cleanup
             handle.spawn(async move {
                 if let Ok(mut state) = state_clone.try_write() {
                     *state = ConnectionState::Disconnected;
                 }
             });
         }
-        // Channel will be automatically closed when sender is dropped
     }
 }
 
@@ -264,7 +260,6 @@ impl Sink<Message> for WebSocketSink {
         self: std::pin::Pin<&mut Self>,
         _cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), Self::Error>> {
-        // Close the sender and update state
         let state_clone = Arc::clone(&self.connection_state);
         tokio::spawn(async move {
             let mut state = state_clone.write().await;
@@ -522,7 +517,9 @@ impl Connection<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
                         SimplePingTracker::new(Duration::from_secs(self.config.ping_timeout));
                 }
 
-                let read_loop = self.read_loop(message_sender, Arc::clone(&connection_state)).await?;
+                let read_loop = self
+                    .read_loop(message_sender, Arc::clone(&connection_state))
+                    .await?;
                 let ping_loop = self.ping_loop().await?;
                 let write_loop = self.write_loop(write_receiver).await?;
 
@@ -771,7 +768,10 @@ mod test {
     use tokio_test::io::Mock;
     use tokio_tungstenite::WebSocketStream as TungsteniteWebSocketStream;
 
-    use crate::{Config, Connection, SimplePingTracker, WSManager, ConnectionState, WebSocketSink, WebSocketStream};
+    use crate::{
+        Config, Connection, ConnectionState, SimplePingTracker, WSManager, WebSocketSink,
+        WebSocketStream,
+    };
     use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
 
     async fn setup(mock: Mock) -> Connection<Mock> {
@@ -813,7 +813,10 @@ mod test {
 
         let (message_sender, _message_receiver) = tokio::sync::mpsc::unbounded_channel();
         let connection_state = Arc::new(RwLock::new(ConnectionState::Connected));
-        let read_handle = conn.read_loop(message_sender, connection_state).await.unwrap();
+        let read_handle = conn
+            .read_loop(message_sender, connection_state)
+            .await
+            .unwrap();
         let res = tokio::join!(read_handle);
 
         assert!(res.0.unwrap().is_err());
@@ -1169,10 +1172,9 @@ mod test {
 
     #[tokio::test]
     async fn stream_sink_api_types_compile() {
-        // This test verifies the types compile and basic API works without network calls
+        // This test verifies the Stream/Sink API types compile and basic methods work
         let manager = WSManager::new();
-        
-        // Test that we can create the types and they have the expected methods
+
         let (_message_sender, message_receiver) = tokio::sync::mpsc::unbounded_channel();
         let (write_sender, _write_receiver) = tokio::sync::mpsc::unbounded_channel();
         let connection_state = Arc::new(RwLock::new(ConnectionState::Connected));
@@ -1181,26 +1183,13 @@ mod test {
             sender: write_sender,
             connection_state: Arc::clone(&connection_state),
         };
-        
+
         let _stream = WebSocketStream {
             receiver: message_receiver,
             connection_state: Arc::clone(&connection_state),
         };
 
-        // Verify we can call the API methods
         assert_eq!(sink.connection_state().await, ConnectionState::Connected);
-        
-        // Verify manager has the connect_stream method (compilation test)
-        let _config = Config {
-            ping_duration: 10,
-            ping_message: "ping".to_string(),
-            ping_timeout: 15,
-            url: "ws://test".to_string(),
-            reconnect_timeout: 10,
-            write_on_init: Vec::new(),
-        };
-        
-        // Just verify the method exists - don't call it to avoid network calls
         assert!(manager.conn.is_empty());
     }
 
@@ -1234,7 +1223,7 @@ mod test {
 
     #[tokio::test]
     async fn connection_state_enum_works() {
-        // This test verifies the ConnectionState enum functionality
+        // This test verifies ConnectionState enum equality and cloning behavior
         let state1 = ConnectionState::Connected;
         let state2 = ConnectionState::Disconnected;
         let state3 = ConnectionState::Error("test error".to_string());
@@ -1244,34 +1233,32 @@ mod test {
         assert_ne!(state1, state2);
         assert_ne!(state2, state3);
 
-        // Test cloning
         let state1_clone = state1.clone();
         assert_eq!(state1, state1_clone);
     }
 
     #[tokio::test]
     async fn websocket_sink_stream_channel_behavior() {
-        // This test verifies the channel behavior without network calls
+        // This test verifies WebSocketSink and WebSocketStream connection state tracking
         let (_message_sender, message_receiver) = tokio::sync::mpsc::unbounded_channel();
-        let (write_sender, _write_receiver) = tokio::sync::mpsc::unbounded_channel();
-        
+        let (write_sender, write_receiver) = tokio::sync::mpsc::unbounded_channel();
+
         let connection_state = Arc::new(RwLock::new(ConnectionState::Connected));
 
         let mut sink = WebSocketSink {
             sender: write_sender,
             connection_state: Arc::clone(&connection_state),
         };
-        
+
         let stream = WebSocketStream {
             receiver: message_receiver,
             connection_state: Arc::clone(&connection_state),
         };
 
-        // Test initial state
         assert_eq!(sink.connection_state().await, ConnectionState::Connected);
         assert_eq!(stream.connection_state().await, ConnectionState::Connected);
-        
-        // Test close functionality
+
+        drop(write_receiver);
         sink.close().await.unwrap();
         assert_eq!(sink.connection_state().await, ConnectionState::Disconnected);
     }

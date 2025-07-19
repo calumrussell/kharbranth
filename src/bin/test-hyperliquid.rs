@@ -50,11 +50,8 @@ async fn main() -> Result<()> {
         write_on_init: vec![TungsteniteMessage::Text(subscribe_json.into())],
     };
 
-    // Use the new Stream/Sink API
     use futures_util::StreamExt;
     let (_sink, mut stream) = manager.connect_stream("hyperliquid", config).await?;
-
-    // Spawn a task to handle incoming messages
     tokio::spawn(async move {
         while let Some(result) = stream.next().await {
             match result {
