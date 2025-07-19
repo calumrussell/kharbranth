@@ -163,7 +163,9 @@ where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     pub async fn write(&mut self, msg: Message) -> ConnectionResult {
-        let write_clone = Arc::clone(self.write.as_ref().unwrap());
+        let write = self.write.as_ref()
+            .ok_or_else(|| anyhow!("Connection write stream not initialized"))?;
+        let write_clone = Arc::clone(write);
         let mut write_lock = write_clone.lock().await;
         if let Err(e) = write_lock.send(msg).await {
             return Err(anyhow!(ConnectionError::WriteError(e.to_string())));
@@ -171,12 +173,14 @@ where
         Ok(())
     }
 
-    async fn ping_loop(&mut self) -> JoinHandle<ConnectionResult> {
-        let write_clone = Arc::clone(self.write.as_ref().unwrap());
+    async fn ping_loop(&mut self) -> Result<JoinHandle<ConnectionResult>, Error> {
+        let write = self.write.as_ref()
+            .ok_or_else(|| anyhow!("Connection write stream not initialized for ping loop"))?;
+        let write_clone = Arc::clone(write);
         let ping_tracker_clone = Arc::clone(&self.ping_tracker);
         let ping_duration_clone = self.config.ping_duration;
 
-        tokio::spawn(async move {
+        Ok(tokio::spawn(async move {
             loop {
                 {
                     let mut tracker = ping_tracker_clone.write().await;
@@ -186,7 +190,7 @@ where
                         // Create unique payload using current timestamp
                         let timestamp = SystemTime::now()
                             .duration_since(SystemTime::UNIX_EPOCH)
-                            .unwrap()
+                            .map_err(|e| anyhow!("System time error: {}", e))?
                             .as_nanos()
                             .to_le_bytes()
                             .to_vec();
@@ -200,11 +204,13 @@ where
                 }
                 sleep(Duration::from_secs(ping_duration_clone)).await;
             }
-        })
+        }))
     }
 
-    async fn read_loop(&mut self) -> JoinHandle<ConnectionResult> {
-        let read_clone = Arc::clone(self.read.as_ref().unwrap());
+    async fn read_loop(&mut self) -> Result<JoinHandle<ConnectionResult>, Error> {
+        let read = self.read.as_ref()
+            .ok_or_else(|| anyhow!("Connection read stream not initialized for read loop"))?;
+        let read_clone = Arc::clone(read);
         let ping_tracker_clone = Arc::clone(&self.ping_tracker);
 
         let on_text_clone = Arc::clone(&self.hooks.on_text);
@@ -214,7 +220,7 @@ where
         let on_close_clone = Arc::clone(&self.hooks.on_close);
         let on_frame_clone = Arc::clone(&self.hooks.on_frame);
 
-        tokio::spawn(async move {
+        Ok(tokio::spawn(async move {
             loop {
                 let mut read_lock = read_clone.lock().await;
                 match read_lock.next().await {
@@ -267,7 +273,7 @@ where
                     None => return Err(anyhow!(ConnectionError::ConnectionDropped)),
                 }
             }
-        })
+        }))
     }
 
     pub fn new(config: Config, hooks: ReadHooks) -> Self {
@@ -286,7 +292,9 @@ impl Connection<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
     pub async fn start_loop(
         &mut self,
     ) -> Result<(JoinHandle<ConnectionResult>, JoinHandle<ConnectionResult>), Error> {
-        let request = self.config.url.clone().into_client_request().unwrap();
+        let request = self.config.url.clone()
+            .into_client_request()
+            .map_err(|e| anyhow!("Invalid WebSocket URL '{}': {}", self.config.url, e))?;
         match connect_async(request).await {
             Ok((conn, response)) => {
                 debug!("Handshake response: {:?}", response);
@@ -302,13 +310,16 @@ impl Connection<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
                         SimplePingTracker::new(Duration::from_secs(self.config.ping_timeout));
                 }
 
-                let read_loop = self.read_loop().await;
-                let ping_loop = self.ping_loop().await;
+                let read_loop = self.read_loop().await?;
+                let ping_loop = self.ping_loop().await?;
 
                 //Wait 500 for connection init
                 sleep(Duration::from_millis(500)).await;
                 for message in self.config.write_on_init.clone() {
-                    let _ = self.write(message).await;
+                    if let Err(e) = self.write(message).await {
+                        error!("Failed to send initialization message: {}", e);
+                        // Continue with other messages rather than failing the entire connection
+                    }
                 }
 
                 Ok((read_loop, ping_loop))
@@ -547,7 +558,7 @@ mod test {
 
         let mut conn = setup(mock).await;
 
-        let read_handle = conn.read_loop().await;
+        let read_handle = conn.read_loop().await.unwrap();
         let res = tokio::join!(read_handle);
 
         assert!(res.0.unwrap().is_err());
