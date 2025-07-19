@@ -48,6 +48,8 @@ async fn main() -> Result<()> {
         ping_timeout: 30,
         reconnect_timeout: 5,
         write_on_init: vec![TungsteniteMessage::Text(subscribe_json.into())],
+        message_buffer_size: 1000,
+        write_buffer_size: 100,
     };
 
     manager.new_conn("hyperliquid", config).await;
@@ -83,7 +85,7 @@ async fn main() -> Result<()> {
 
     tokio::spawn(async move {
         loop {
-            sleep(Duration::from_secs(10)).await;
+            sleep(Duration::from_secs(30)).await;
             info!("Sending restart signal to hyperliquid connection");
             if let Err(e) = tx.send(kharbranth::BroadcastMessage {
                 target: "hyperliquid".to_string(),
