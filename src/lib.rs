@@ -151,7 +151,7 @@ pub struct Connection<S> {
     pub read: Option<ReadStream<S>>,
     pub write: Option<WriteStream<S>>,
     pub hooks: ReadHooks,
-    ping_tracker: Arc<Mutex<SimplePingTracker>>,
+    ping_tracker: Arc<RwLock<SimplePingTracker>>,
 }
 
 impl<S> Connection<S>
@@ -175,14 +175,21 @@ where
         tokio::spawn(async move {
             loop {
                 {
-                    let mut tracker = ping_tracker_clone.lock().await;
-
-                    // Check for timeout first
+                    let tracker = ping_tracker_clone.read().await;
                     if let Err(e) = tracker.check_timeout() {
                         return Err(e);
                     }
 
-                    // Only send ping if none is outstanding
+                    if !tracker.should_send_ping() {
+                        drop(tracker);
+                        sleep(Duration::from_secs(ping_duration_clone)).await;
+                        continue;
+                    }
+                }
+
+                {
+                    let mut tracker = ping_tracker_clone.write().await;
+                    // Double-check in case state changed
                     if tracker.should_send_ping() {
                         // Create unique payload using current timestamp
                         let timestamp = SystemTime::now()
@@ -197,7 +204,6 @@ where
                         if let Err(e) = write_lock.send(Message::Ping(payload.into())).await {
                             return Err(anyhow!(ConnectionError::PingFailed(e.to_string())));
                         }
-                        debug!("Ping sent with timestamp payload");
                     }
                 }
                 sleep(Duration::from_secs(ping_duration_clone)).await;
@@ -247,11 +253,10 @@ where
 
                                     // Validate pong against outstanding ping
                                     {
-                                        let mut tracker = ping_tracker_clone.lock().await;
+                                        let mut tracker = ping_tracker_clone.write().await;
                                         if let Err(e) = tracker.handle_pong(pong.to_vec()) {
                                             return Err(e);
                                         }
-                                        debug!("Valid pong received, ping acknowledged");
                                     }
                                 }
                                 Message::Close(maybe_frame) => {
@@ -284,7 +289,7 @@ where
             read: None,
             write: None,
             hooks,
-            ping_tracker: Arc::new(Mutex::new(SimplePingTracker::new(ping_timeout))),
+            ping_tracker: Arc::new(RwLock::new(SimplePingTracker::new(ping_timeout))),
         }
     }
 }
@@ -383,7 +388,7 @@ impl WSManager {
             .insert(name.to_string(), Arc::new(RwLock::new(conn)));
     }
 
-    pub async fn start(
+    pub fn start(
         &self,
         tx: broadcast::Sender<BroadcastMessage>,
     ) -> HashMap<String, JoinHandle<()>> {
@@ -556,7 +561,6 @@ mod test {
         let manager = WSManager::new();
         let mut handles = vec![];
 
-        // Spawn 100 tasks that each add a connection
         for i in 0..100 {
             let manager_clone = manager.clone();
             let handle = tokio::spawn(async move {
@@ -594,7 +598,6 @@ mod test {
         // without blocking.
         let manager = WSManager::new();
 
-        // Add test connections
         for i in 0..10 {
             let config = Config {
                 ping_duration: 10,
@@ -610,7 +613,6 @@ mod test {
                 .await;
         }
 
-        // Spawn concurrent tasks that would access the map
         let mut handles = vec![];
         for i in 0..10 {
             let manager_clone = manager.clone();
@@ -636,7 +638,6 @@ mod test {
         // while other operations try to access the map
         let manager = WSManager::new();
 
-        // Add test connections
         for i in 0..5 {
             let config = Config {
                 ping_duration: 10,
