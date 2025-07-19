@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use kharbranth::{Config, ReadHooks, WSManager};
+use kharbranth::{Config, ReadHooks, WSManager, AsyncHandler};
 use log::info;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
@@ -28,7 +28,7 @@ async fn main() -> Result<()> {
     info!("Starting Hyperliquid WebSocket test");
 
     let manager = WSManager::new();
-    let hooks = ReadHooks::new();
+    let hooks = ReadHooks::new(); // Empty hooks for backward compatibility
 
     let subscription = HyperliquidSubscriptionMessage {
         typ: "candle".to_string(),
@@ -54,8 +54,34 @@ async fn main() -> Result<()> {
 
     manager.new_conn("hyperliquid", config, hooks).await;
 
+    // Subscribe to text messages using the new enhanced routing API
+    let _text_subscription = manager.subscribe("hyperliquid", AsyncHandler::new(|text| async move {
+        info!("Received candle data: {}", text);
+        // Process the candle data here
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
+            info!("Parsed JSON: {}", parsed);
+        }
+    })).await?;
+
+    // Subscribe to connection events  
+    let _event_subscription = manager.subscribe_connection_events("hyperliquid", AsyncHandler::new(|event| async move {
+        info!("Connection event: {}", event);
+    })).await?;
+
     let (tx, _rx) = broadcast::channel(16);
     let _handles = manager.start(tx.clone());
+
+    // Monitor connection statistics
+    let manager_clone = manager.clone();
+    tokio::spawn(async move {
+        loop {
+            sleep(Duration::from_secs(30)).await;
+            if let Ok(stats) = manager_clone.get_connection_stats("hyperliquid").await {
+                info!("Stats - Received: {}, Processed: {}, Dropped: {}", 
+                      stats.total_received, stats.total_processed, stats.total_dropped);
+            }
+        }
+    });
 
     sleep(Duration::from_secs(2)).await;
 
