@@ -83,6 +83,21 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Send restart message every 20 seconds to test reconnection logic
+    let tx_clone = tx.clone();
+    tokio::spawn(async move {
+        loop {
+            sleep(Duration::from_secs(20)).await;
+            info!("Sending restart signal to hyperliquid connection");
+            if let Err(e) = tx_clone.send(kharbranth::BroadcastMessage {
+                target: "hyperliquid".to_string(),
+                action: 0, // Restart action
+            }) {
+                info!("Failed to send restart signal: {}", e);
+            }
+        }
+    });
+
     sleep(Duration::from_secs(2)).await;
 
     loop {
