@@ -301,6 +301,13 @@ impl Connection<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
                 self.read = Some(Arc::new(Mutex::new(read)));
                 self.write = Some(Arc::new(Mutex::new(write)));
 
+                // Reset ping tracker for new connection
+                {
+                    let mut tracker = self.ping_tracker.write().await;
+                    *tracker =
+                        SimplePingTracker::new(Duration::from_secs(self.config.ping_timeout));
+                }
+
                 let read_loop = self.read_loop().await;
                 let ping_loop = self.ping_loop().await;
 
@@ -496,14 +503,15 @@ impl WSManager {
 #[cfg(test)]
 mod test {
     use std::sync::Arc;
+    use std::time::Duration;
 
     use futures_util::StreamExt;
     use tokio::io::ErrorKind;
-    use tokio::sync::Mutex;
+    use tokio::sync::{Mutex, RwLock};
     use tokio_test::io::Mock;
     use tokio_tungstenite::WebSocketStream;
 
-    use crate::{Config, Connection, ReadHooks, WSManager};
+    use crate::{Config, Connection, ReadHooks, SimplePingTracker, WSManager};
 
     async fn setup(mock: Mock) -> Connection<Mock> {
         let ws_stream = WebSocketStream::from_raw_socket(
@@ -588,8 +596,7 @@ mod test {
 
     #[tokio::test]
     async fn concurrent_write_to_different_connections() {
-        // This test verifies that DashMap allows concurrent writes to different connections
-        // without blocking.
+        // This test verifies that DashMap allows concurrent writes to different connections without blocking
         let manager = WSManager::new();
 
         for i in 0..10 {
@@ -610,14 +617,13 @@ mod test {
         let mut handles = vec![];
         for i in 0..10 {
             let manager_clone = manager.clone();
-            let handle = tokio::spawn(async move {
-                // Simulate checking if connection exists (read operation)
-                manager_clone.conn.contains_key(&format!("conn_{}", i))
-            });
+            let handle =
+                tokio::spawn(
+                    async move { manager_clone.conn.contains_key(&format!("conn_{}", i)) },
+                );
             handles.push(handle);
         }
 
-        // All operations should complete without blocking
         for handle in handles {
             let result = handle.await.unwrap();
             assert!(result);
@@ -625,11 +631,61 @@ mod test {
     }
 
     #[tokio::test]
-    async fn no_deadlock_during_start_and_write() {
-        use tokio::time::{Duration, timeout};
+    async fn ping_tracker_timeout_after_stale_state() {
+        // This test verifies that check_timeout properly detects when a ping has timed out
+        use tokio::time::{Duration, sleep};
 
+        let timeout_duration = Duration::from_secs(1);
+        let mut tracker = SimplePingTracker::new(timeout_duration);
+
+        let payload = vec![1, 2, 3];
+        tracker.send_ping(payload.clone());
+
+        assert!(tracker.check_timeout().is_ok());
+
+        sleep(timeout_duration + Duration::from_millis(100)).await;
+
+        assert!(tracker.check_timeout().is_err());
+
+        tracker.handle_pong(payload).unwrap();
+        assert!(tracker.check_timeout().is_ok());
+    }
+
+    #[tokio::test]
+    async fn ping_tracker_resets_on_reconnection() {
+        // This test verifies that the ping tracker is reset when a new connection is established,
+        // preventing stale ping state from causing immediate timeouts on reconnection
+
+        let tracker = Arc::new(RwLock::new(SimplePingTracker::new(Duration::from_secs(15))));
+
+        {
+            let mut tracker_guard = tracker.write().await;
+            tracker_guard.send_ping(vec![1, 2, 3]);
+        }
+
+        {
+            let tracker_guard = tracker.read().await;
+            assert!(tracker_guard.last_ping_sent.is_some());
+        }
+
+        {
+            let mut tracker_guard = tracker.write().await;
+            *tracker_guard = SimplePingTracker::new(Duration::from_secs(15));
+        }
+
+        {
+            let tracker_guard = tracker.read().await;
+            assert!(tracker_guard.last_ping_sent.is_none());
+            assert!(tracker_guard.should_send_ping());
+        }
+    }
+
+    #[tokio::test]
+    async fn no_deadlock_during_start_and_write() {
         // This test verifies that DashMap doesn't cause deadlocks when start() is iterating
         // while other operations try to access the map
+        use tokio::time::{Duration, timeout};
+
         let manager = WSManager::new();
 
         for i in 0..5 {
@@ -650,25 +706,19 @@ mod test {
         let manager_clone1 = manager.clone();
         let manager_clone2 = manager.clone();
 
-        // Start iterating over connections (simulating start())
         let iterate_task = tokio::spawn(async move {
-            // Simulate what start() does - iterate and hold references
             for _ in 0..100 {
                 for entry in &*manager_clone1.conn {
                     let _name = entry.key();
                     let _conn = entry.value();
-                    // Small delay to increase chance of race condition
                     tokio::time::sleep(Duration::from_micros(10)).await;
                 }
             }
         });
 
-        // Concurrently try to add new connections
         let write_task = tokio::spawn(async move {
-            // Give iteration a chance to start
             tokio::time::sleep(Duration::from_millis(1)).await;
 
-            // This should not deadlock even though start() is iterating
             for i in 5..10 {
                 let config = Config {
                     ping_duration: 10,
@@ -683,11 +733,9 @@ mod test {
                     .new_conn(&format!("conn_{}", i), config, hooks)
                     .await;
             }
-            // Return number of connections added
             5
         });
 
-        // Both operations should complete within a reasonable time (no deadlock)
         let result = timeout(Duration::from_secs(5), async {
             let (r1, r2) = tokio::join!(iterate_task, write_task);
             (r1, r2)
@@ -700,7 +748,6 @@ mod test {
         assert!(iterate_result.is_ok());
         assert_eq!(write_result.unwrap(), 5);
 
-        // Verify all connections were added
         assert_eq!(manager.conn.len(), 10);
     }
 }
