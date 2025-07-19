@@ -1021,7 +1021,7 @@ mod test {
 
         // Subscribe to text messages
         let message_count_clone = Arc::clone(&message_count);
-        let text_handler = crate::routing::AsyncHandler::new(move |text: String| {
+        let text_handler = crate::routing::AsyncHandler::new(move |text: Arc<str>| {
             let count = Arc::clone(&message_count_clone);
             async move {
                 log::info!("Received message: {}", text);
@@ -1033,7 +1033,7 @@ mod test {
 
         // Subscribe to connection events
         let connection_event_count_clone = Arc::clone(&connection_event_count);
-        let event_handler = crate::routing::AsyncHandler::new(move |event: String| {
+        let event_handler = crate::routing::AsyncHandler::new(move |event: Arc<str>| {
             let count = Arc::clone(&connection_event_count_clone);
             async move {
                 log::info!("Received connection event: {}", event);
@@ -1111,7 +1111,7 @@ mod test {
         let processed_count = Arc::new(AtomicUsize::new(0));
         let processed_count_clone = Arc::clone(&processed_count);
         
-        let slow_handler = crate::routing::AsyncHandler::new(move |_text: String| {
+        let slow_handler = crate::routing::AsyncHandler::new(move |_text: Arc<str>| {
             let count = Arc::clone(&processed_count_clone);
             async move {
                 // Simulate slow processing
@@ -1165,19 +1165,19 @@ mod test {
         let count3 = Arc::new(AtomicUsize::new(0));
 
         let count1_clone = Arc::clone(&count1);
-        let handler1 = crate::routing::AsyncHandler::new(move |_text: String| {
+        let handler1 = crate::routing::AsyncHandler::new(move |_text: Arc<str>| {
             let count = Arc::clone(&count1_clone);
             async move { count.fetch_add(1, Ordering::Relaxed); }
         });
 
         let count2_clone = Arc::clone(&count2);
-        let handler2 = crate::routing::AsyncHandler::new(move |_text: String| {
+        let handler2 = crate::routing::AsyncHandler::new(move |_text: Arc<str>| {
             let count = Arc::clone(&count2_clone);
             async move { count.fetch_add(1, Ordering::Relaxed); }
         });
 
         let count3_clone = Arc::clone(&count3);
-        let handler3 = crate::routing::AsyncHandler::new(move |_text: String| {
+        let handler3 = crate::routing::AsyncHandler::new(move |_text: Arc<str>| {
             let count = Arc::clone(&count3_clone);
             async move { count.fetch_add(1, Ordering::Relaxed); }
         });
@@ -1239,13 +1239,13 @@ mod test {
 
         // Subscribe to each connection separately
         let conn1_count_clone = Arc::clone(&conn1_count);
-        let _sub1 = manager.subscribe("conn1", crate::routing::AsyncHandler::new(move |_text: String| {
+        let _sub1 = manager.subscribe("conn1", crate::routing::AsyncHandler::new(move |_text: Arc<str>| {
             let count = Arc::clone(&conn1_count_clone);
             async move { count.fetch_add(1, Ordering::Relaxed); }
         })).await.unwrap();
 
         let conn2_count_clone = Arc::clone(&conn2_count);
-        let _sub2 = manager.subscribe("conn2", crate::routing::AsyncHandler::new(move |_text: String| {
+        let _sub2 = manager.subscribe("conn2", crate::routing::AsyncHandler::new(move |_text: Arc<str>| {
             let count = Arc::clone(&conn2_count_clone);
             async move { count.fetch_add(1, Ordering::Relaxed); }
         })).await.unwrap();
@@ -1290,7 +1290,7 @@ mod test {
         manager.new_conn("error_conn", config, ReadHooks::new()).await;
 
         // Test subscribing to non-existent connection
-        let handler = crate::routing::AsyncHandler::new(|_text: String| async move {});
+        let handler = crate::routing::AsyncHandler::new(|_text: Arc<str>| async move {});
         let result = manager.subscribe("nonexistent", handler).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Connection 'nonexistent' not found"));
@@ -1334,7 +1334,7 @@ mod test {
             let processed_count_clone = Arc::clone(&processed_count);
             
             let handle = tokio::spawn(async move {
-                let handler = crate::routing::AsyncHandler::new(move |text: String| {
+                let handler = crate::routing::AsyncHandler::new(move |text: Arc<str>| {
                     let count = Arc::clone(&processed_count_clone);
                     async move {
                         // Simulate some processing time
@@ -1419,12 +1419,12 @@ mod test {
         // Subscribe to connection events
         let event_count_clone = Arc::clone(&event_count);
         let received_events_clone = Arc::clone(&received_events);
-        let _event_sub = manager.subscribe_connection_events("event_conn", crate::routing::AsyncHandler::new(move |event_json: String| {
+        let _event_sub = manager.subscribe_connection_events("event_conn", crate::routing::AsyncHandler::new(move |event_json: Arc<str>| {
             let count = Arc::clone(&event_count_clone);
             let events = Arc::clone(&received_events_clone);
             async move {
                 count.fetch_add(1, Ordering::Relaxed);
-                events.lock().await.push(event_json);
+                events.lock().await.push(event_json.to_string());
             }
         })).await.unwrap();
 
@@ -1488,13 +1488,13 @@ mod test {
 
         // Subscribe to both text messages and connection events
         let text_count_clone = Arc::clone(&text_count);
-        let _text_sub = manager.subscribe("mixed_conn", crate::routing::AsyncHandler::new(move |_text: String| {
+        let _text_sub = manager.subscribe("mixed_conn", crate::routing::AsyncHandler::new(move |_text: Arc<str>| {
             let count = Arc::clone(&text_count_clone);
             async move { count.fetch_add(1, Ordering::Relaxed); }
         })).await.unwrap();
 
         let event_count_clone = Arc::clone(&event_count);
-        let _event_sub = manager.subscribe_connection_events("mixed_conn", crate::routing::AsyncHandler::new(move |_event: String| {
+        let _event_sub = manager.subscribe_connection_events("mixed_conn", crate::routing::AsyncHandler::new(move |_event: Arc<str>| {
             let count = Arc::clone(&event_count_clone);
             async move { count.fetch_add(1, Ordering::Relaxed); }
         })).await.unwrap();
@@ -1552,7 +1552,7 @@ mod test {
 
         // Add first subscription
         let processed_count_clone = Arc::clone(&processed_count);
-        let sub1 = manager.subscribe("lifecycle_conn", crate::routing::AsyncHandler::new(move |_text: String| {
+        let sub1 = manager.subscribe("lifecycle_conn", crate::routing::AsyncHandler::new(move |_text: Arc<str>| {
             let count = Arc::clone(&processed_count_clone);
             async move { count.fetch_add(1, Ordering::Relaxed); }
         })).await.unwrap();
@@ -1561,7 +1561,7 @@ mod test {
 
         // Add second subscription
         let processed_count_clone = Arc::clone(&processed_count);
-        let sub2 = manager.subscribe("lifecycle_conn", crate::routing::AsyncHandler::new(move |_text: String| {
+        let sub2 = manager.subscribe("lifecycle_conn", crate::routing::AsyncHandler::new(move |_text: Arc<str>| {
             let count = Arc::clone(&processed_count_clone);
             async move { count.fetch_add(10, Ordering::Relaxed); }
         })).await.unwrap();

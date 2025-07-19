@@ -1,5 +1,5 @@
 use std::{
-    sync::{Arc, atomic::{AtomicUsize, Ordering}},
+    sync::{Arc, atomic::{AtomicUsize, AtomicU64, Ordering}},
     future::Future,
     pin::Pin,
 };
@@ -8,7 +8,7 @@ use anyhow::Result;
 use dashmap::DashMap;
 use log::{debug, warn};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::mpsc;
 
 pub type SubscriptionId = usize;
 
@@ -37,11 +37,11 @@ pub enum ErrorEvent {
 }
 
 pub trait MessageHandler: Send + Sync {
-    fn handle_text(&self, message: &str) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+    fn handle_text(&self, message: Arc<str>) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
 }  
 pub struct AsyncHandler<F, Fut>
 where
-    F: Fn(String) -> Fut + Send + Sync,
+    F: Fn(Arc<str>) -> Fut + Send + Sync,
     Fut: Future<Output = ()> + Send,
 {
     handler: F,
@@ -49,7 +49,7 @@ where
 
 impl<F, Fut> AsyncHandler<F, Fut>
 where
-    F: Fn(String) -> Fut + Send + Sync,
+    F: Fn(Arc<str>) -> Fut + Send + Sync,
     Fut: Future<Output = ()> + Send,
 {
     pub fn new(handler: F) -> Self {
@@ -59,11 +59,11 @@ where
 
 impl<F, Fut> MessageHandler for AsyncHandler<F, Fut>
 where
-    F: Fn(String) -> Fut + Send + Sync,
+    F: Fn(Arc<str>) -> Fut + Send + Sync,
     Fut: Future<Output = ()> + Send,
 {
-    fn handle_text(&self, message: &str) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-        Box::pin((self.handler)(message.to_string()))
+    fn handle_text(&self, message: Arc<str>) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin((self.handler)(message))
     }
 }
 
@@ -80,6 +80,33 @@ pub struct QueueStats {
     pub total_received: u64,
     pub total_dropped: u64,
     pub total_processed: u64,
+}
+
+struct AtomicStats {
+    pending: AtomicUsize,
+    total_received: AtomicU64,
+    total_dropped: AtomicU64,
+    total_processed: AtomicU64,
+}
+
+impl AtomicStats {
+    fn new() -> Self {
+        Self {
+            pending: AtomicUsize::new(0),
+            total_received: AtomicU64::new(0),
+            total_dropped: AtomicU64::new(0),
+            total_processed: AtomicU64::new(0),
+        }
+    }
+
+    fn get_snapshot(&self) -> QueueStats {
+        QueueStats {
+            pending: self.pending.load(Ordering::Relaxed),
+            total_received: self.total_received.load(Ordering::Relaxed),
+            total_dropped: self.total_dropped.load(Ordering::Relaxed),
+            total_processed: self.total_processed.load(Ordering::Relaxed),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -102,7 +129,7 @@ impl Default for ConnectionConfig {
 struct Subscription {
     id: SubscriptionId,
     handler: Arc<dyn MessageHandler>,
-    sender: mpsc::Sender<String>,
+    sender: mpsc::Sender<Arc<str>>,
 }
 
 pub struct ConnectionRouter {
@@ -110,7 +137,7 @@ pub struct ConnectionRouter {
     connection_event_subscriptions: Arc<DashMap<SubscriptionId, Subscription>>,
     config: ConnectionConfig,
     next_id: AtomicUsize,
-    stats: Arc<RwLock<QueueStats>>,
+    stats: Arc<AtomicStats>,
 }
 
 impl ConnectionRouter {
@@ -120,12 +147,7 @@ impl ConnectionRouter {
             connection_event_subscriptions: Arc::new(DashMap::new()),
             config,
             next_id: AtomicUsize::new(0),
-            stats: Arc::new(RwLock::new(QueueStats {
-                pending: 0,
-                total_received: 0,
-                total_dropped: 0,
-                total_processed: 0,
-            })),
+            stats: Arc::new(AtomicStats::new()),
         }
     }
 
@@ -136,7 +158,7 @@ impl ConnectionRouter {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let handler = Arc::new(handler);
         
-        let (sender, mut receiver) = mpsc::channel(self.config.max_pending_messages);
+        let (sender, mut receiver) = mpsc::channel::<Arc<str>>(self.config.max_pending_messages);
         
         let subscription = Subscription {
             id,
@@ -149,11 +171,10 @@ impl ConnectionRouter {
         let stats = Arc::clone(&self.stats);
         tokio::spawn(async move {
             while let Some(text) = receiver.recv().await {
-                handler.handle_text(&text).await;
+                handler.handle_text(text).await;
                 
-                let mut stats_guard = stats.write().await;
-                stats_guard.total_processed += 1;
-                stats_guard.pending = stats_guard.pending.saturating_sub(1);
+                stats.total_processed.fetch_add(1, Ordering::Relaxed);
+                stats.pending.fetch_sub(1, Ordering::Relaxed);
             }
             debug!("Text subscription {} handler task completed", id);
         });
@@ -169,7 +190,7 @@ impl ConnectionRouter {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let handler = Arc::new(handler);
         
-        let (sender, mut receiver) = mpsc::channel(100);
+        let (sender, mut receiver) = mpsc::channel::<Arc<str>>(100);
         
         let subscription = Subscription {
             id,
@@ -181,7 +202,7 @@ impl ConnectionRouter {
         
         tokio::spawn(async move {
             while let Some(event_json) = receiver.recv().await {
-                handler.handle_text(&event_json).await;
+                handler.handle_text(event_json).await;
             }
             debug!("Connection event subscription {} handler task completed", id);
         });
@@ -197,21 +218,19 @@ impl ConnectionRouter {
     }
 
     pub async fn route_text_message(&self, text: &str) -> Result<()> {
-        let mut stats_guard = self.stats.write().await;
-        stats_guard.total_received += 1;
-        drop(stats_guard);
+        self.stats.total_received.fetch_add(1, Ordering::Relaxed);
 
         let mut _messages_sent = 0;
         let mut messages_dropped = 0;
+        let shared_text: Arc<str> = text.into();
 
         for entry in self.text_subscriptions.iter() {
             let subscription = entry.value();
             
-            match subscription.sender.try_send(text.to_string()) {
+            match subscription.sender.try_send(Arc::clone(&shared_text)) {
                 Ok(_) => {
                     _messages_sent += 1;
-                    let mut stats_guard = self.stats.write().await;
-                    stats_guard.pending += 1;
+                    self.stats.pending.fetch_add(1, Ordering::Relaxed);
                 }
                 Err(mpsc::error::TrySendError::Full(_)) => {
                     match self.config.backpressure_policy {
@@ -236,8 +255,7 @@ impl ConnectionRouter {
         }
 
         if messages_dropped > 0 {
-            let mut stats_guard = self.stats.write().await;
-            stats_guard.total_dropped += messages_dropped;
+            self.stats.total_dropped.fetch_add(messages_dropped, Ordering::Relaxed);
         }
 
         Ok(())
@@ -246,11 +264,12 @@ impl ConnectionRouter {
     pub async fn route_connection_event(&self, event: ConnectionEvent) -> Result<()> {
         let event_json = serde_json::to_string(&event)
             .map_err(|e| anyhow::anyhow!("Failed to serialize connection event: {}", e))?;
+        let shared_event: Arc<str> = event_json.into();
 
         for entry in self.connection_event_subscriptions.iter() {
             let subscription = entry.value();
             
-            match subscription.sender.try_send(event_json.clone()) {
+            match subscription.sender.try_send(Arc::clone(&shared_event)) {
                 Ok(_) => {
                     debug!("Sent connection event to subscription {}", subscription.id);
                 }
@@ -268,7 +287,7 @@ impl ConnectionRouter {
     }
 
     pub async fn get_stats(&self) -> QueueStats {
-        self.stats.read().await.clone()
+        self.stats.get_snapshot()
     }
 
     pub fn subscription_count(&self) -> usize {
