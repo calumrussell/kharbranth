@@ -1,12 +1,11 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use kharbranth::{Config, ReadHooks, WSManager};
+use kharbranth::{Config, Message, WSManager};
 use log::info;
 use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast;
 use tokio::time::sleep;
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct HyperliquidSubscribe {
@@ -28,7 +27,6 @@ async fn main() -> Result<()> {
     info!("Starting Hyperliquid WebSocket test");
 
     let manager = WSManager::new();
-    let hooks = ReadHooks::new();
 
     let subscription = HyperliquidSubscriptionMessage {
         typ: "candle".to_string(),
@@ -49,13 +47,31 @@ async fn main() -> Result<()> {
         ping_message: "{\"method\":\"ping\"}".to_string(),
         ping_timeout: 30,
         reconnect_timeout: 5,
-        write_on_init: vec![Message::Text(subscribe_json.into())],
+        write_on_init: vec![TungsteniteMessage::Text(subscribe_json.into())],
     };
 
-    manager.new_conn("hyperliquid", config, hooks).await;
+    // Use the new Stream/Sink API
+    use futures_util::StreamExt;
+    let (_sink, mut stream) = manager.connect_stream("hyperliquid", config).await?;
 
-    let (tx, _rx) = broadcast::channel(16);
-    let _handles = manager.start(tx.clone());
+    // Spawn a task to handle incoming messages
+    tokio::spawn(async move {
+        while let Some(message) = stream.next().await {
+            match message {
+                Message::Text(text) => {
+                    info!("Received text: {}", text);
+                }
+                Message::Binary(data) => {
+                    info!("Received binary data: {} bytes", data.len());
+                }
+                Message::Close(_) => {
+                    info!("Connection closed");
+                    break;
+                }
+                _ => {}
+            }
+        }
+    });
 
     sleep(Duration::from_secs(2)).await;
 
