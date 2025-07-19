@@ -176,9 +176,7 @@ where
             loop {
                 {
                     let tracker = ping_tracker_clone.read().await;
-                    if let Err(e) = tracker.check_timeout() {
-                        return Err(e);
-                    }
+                    tracker.check_timeout()?;
 
                     if !tracker.should_send_ping() {
                         drop(tracker);
@@ -246,17 +244,13 @@ where
                                     }
                                 }
                                 Message::Pong(pong) => {
-                                    // Call user hook first
                                     if let Some(on_pong_func) = on_pong_clone.as_ref() {
                                         on_pong_func(pong.clone());
                                     }
 
-                                    // Validate pong against outstanding ping
                                     {
                                         let mut tracker = ping_tracker_clone.write().await;
-                                        if let Err(e) = tracker.handle_pong(pong.to_vec()) {
-                                            return Err(e);
-                                        }
+                                        tracker.handle_pong(pong.to_vec())?;
                                     }
                                 }
                                 Message::Close(maybe_frame) => {
