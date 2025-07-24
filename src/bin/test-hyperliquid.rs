@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use kharbranth::{Config, ReadHooks, WSManager, AsyncHandler};
+use kharbranth::{AsyncHandler, Config, ReadHooks, WSManager};
 use log::info;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
@@ -54,17 +54,26 @@ async fn main() -> Result<()> {
 
     manager.new_conn("hyperliquid", config, hooks).await;
 
-    let _text_subscription = manager.subscribe("hyperliquid", AsyncHandler::new(|text| async move {
-        info!("Received candle data: {}", text);
-        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
-            info!("Parsed JSON: {}", parsed);
-        }
-    })).await?;
+    let _text_subscription = manager
+        .subscribe(
+            "hyperliquid",
+            AsyncHandler::new(|text| async move {
+                info!("Received candle data: {}", text);
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
+                    info!("Parsed JSON: {}", parsed);
+                }
+            }),
+        )
+        .await?;
 
-  
-    let _event_subscription = manager.subscribe_connection_events("hyperliquid", AsyncHandler::new(|event| async move {
-        info!("Connection event: {}", event);
-    })).await?;
+    let _event_subscription = manager
+        .subscribe_connection_events(
+            "hyperliquid",
+            AsyncHandler::new(|event| async move {
+                info!("Connection event: {}", event);
+            }),
+        )
+        .await?;
 
     let (tx, _rx) = broadcast::channel(16);
     let _handles = manager.start(tx.clone());
@@ -74,8 +83,10 @@ async fn main() -> Result<()> {
         loop {
             sleep(Duration::from_secs(30)).await;
             if let Ok(stats) = manager_clone.get_connection_stats("hyperliquid").await {
-                info!("Stats - Received: {}, Processed: {}, Dropped: {}", 
-                      stats.total_received, stats.total_processed, stats.total_dropped);
+                info!(
+                    "Stats - Received: {}, Processed: {}, Dropped: {}",
+                    stats.total_received, stats.total_processed, stats.total_dropped
+                );
             }
         }
     });

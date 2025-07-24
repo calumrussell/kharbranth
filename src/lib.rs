@@ -29,8 +29,8 @@ use tokio_util::bytes::Bytes;
 
 pub mod routing;
 pub use routing::{
-    MessageHandler, AsyncHandler, ConnectionEvent, ErrorEvent, 
-    BackpressurePolicy, QueueStats, ConnectionConfig, SubscriptionId
+    AsyncHandler, BackpressurePolicy, ConnectionConfig, ConnectionEvent, ErrorEvent,
+    MessageHandler, QueueStats, SubscriptionId,
 };
 
 type BytesFunc = Option<Box<dyn Fn(Bytes) + Send + Sync>>;
@@ -170,7 +170,9 @@ where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     pub async fn write(&mut self, msg: Message) -> ConnectionResult {
-        let write = self.write.as_ref()
+        let write = self
+            .write
+            .as_ref()
             .ok_or_else(|| anyhow!("Connection write stream not initialized"))?;
         let write_clone = Arc::clone(write);
         let mut write_lock = write_clone.lock().await;
@@ -181,7 +183,9 @@ where
     }
 
     async fn ping_loop(&mut self) -> Result<JoinHandle<ConnectionResult>, Error> {
-        let write = self.write.as_ref()
+        let write = self
+            .write
+            .as_ref()
             .ok_or_else(|| anyhow!("Connection write stream not initialized for ping loop"))?;
         let write_clone = Arc::clone(write);
         let ping_tracker_clone = Arc::clone(&self.ping_tracker);
@@ -214,7 +218,9 @@ where
     }
 
     async fn read_loop(&mut self) -> Result<JoinHandle<ConnectionResult>, Error> {
-        let read = self.read.as_ref()
+        let read = self
+            .read
+            .as_ref()
             .ok_or_else(|| anyhow!("Connection read stream not initialized for read loop"))?;
         let read_clone = Arc::clone(read);
         let ping_tracker_clone = Arc::clone(&self.ping_tracker);
@@ -270,7 +276,12 @@ where
                                         on_close_func(maybe_frame);
                                     }
                                     if let Some(ref router) = router_clone {
-                                        if let Err(e) = router.route_connection_event(routing::ConnectionEvent::Disconnected).await {
+                                        if let Err(e) = router
+                                            .route_connection_event(
+                                                routing::ConnectionEvent::Disconnected,
+                                            )
+                                            .await
+                                        {
                                             error!("Failed to route connection event: {}", e);
                                         }
                                     }
@@ -305,7 +316,11 @@ where
         }
     }
 
-    pub fn new_with_router(config: Config, hooks: ReadHooks, router: Arc<routing::ConnectionRouter>) -> Self {
+    pub fn new_with_router(
+        config: Config,
+        hooks: ReadHooks,
+        router: Arc<routing::ConnectionRouter>,
+    ) -> Self {
         let ping_timeout = Duration::from_secs(config.ping_timeout);
         Self {
             config,
@@ -322,7 +337,10 @@ impl Connection<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
     pub async fn start_loop(
         &mut self,
     ) -> Result<(JoinHandle<ConnectionResult>, JoinHandle<ConnectionResult>), Error> {
-        let request = self.config.url.clone()
+        let request = self
+            .config
+            .url
+            .clone()
             .into_client_request()
             .map_err(|e| anyhow!("Invalid WebSocket URL '{}': {}", self.config.url, e))?;
         match connect_async(request).await {
@@ -420,18 +438,24 @@ impl WSManager {
     }
 
     pub async fn new_conn(&self, name: &str, config: Config, hooks: ReadHooks) {
-        self.new_conn_with_router_config(name, config, hooks, routing::ConnectionConfig::default()).await;
+        self.new_conn_with_router_config(name, config, hooks, routing::ConnectionConfig::default())
+            .await;
     }
 
-    pub async fn new_conn_with_router_config(&self, name: &str, config: Config, hooks: ReadHooks, router_config: routing::ConnectionConfig) {
+    pub async fn new_conn_with_router_config(
+        &self,
+        name: &str,
+        config: Config,
+        hooks: ReadHooks,
+        router_config: routing::ConnectionConfig,
+    ) {
         let router = Arc::new(routing::ConnectionRouter::new(router_config));
-        
+
         let conn = Connection::new_with_router(config, hooks, Arc::clone(&router));
 
         self.conn
             .insert(name.to_string(), Arc::new(RwLock::new(conn)));
-        self.routers
-            .insert(name.to_string(), router);
+        self.routers.insert(name.to_string(), router);
     }
 
     pub fn start(
@@ -548,24 +572,38 @@ impl WSManager {
     where
         H: MessageHandler + 'static,
     {
-        let router = self.routers.get(connection_name)
+        let router = self
+            .routers
+            .get(connection_name)
             .ok_or_else(|| anyhow!("Connection '{}' not found", connection_name))?;
         router.subscribe_text(handler).await
     }
 
-    pub async fn subscribe_connection_events<H>(&self, connection_name: &str, handler: H) -> Result<SubscriptionId>
+    pub async fn subscribe_connection_events<H>(
+        &self,
+        connection_name: &str,
+        handler: H,
+    ) -> Result<SubscriptionId>
     where
         H: MessageHandler + 'static,
     {
-        let router = self.routers.get(connection_name)
+        let router = self
+            .routers
+            .get(connection_name)
             .ok_or_else(|| anyhow!("Connection '{}' not found", connection_name))?;
         router.subscribe_connection_events(handler).await
     }
 
-    pub fn unsubscribe(&self, connection_name: &str, subscription_id: SubscriptionId) -> Result<()> {
-        let router = self.routers.get(connection_name)
+    pub fn unsubscribe(
+        &self,
+        connection_name: &str,
+        subscription_id: SubscriptionId,
+    ) -> Result<()> {
+        let router = self
+            .routers
+            .get(connection_name)
             .ok_or_else(|| anyhow!("Connection '{}' not found", connection_name))?;
-        
+
         if router.unsubscribe(subscription_id) {
             Ok(())
         } else {
@@ -574,7 +612,9 @@ impl WSManager {
     }
 
     pub async fn get_connection_stats(&self, connection_name: &str) -> Result<QueueStats> {
-        let router = self.routers.get(connection_name)
+        let router = self
+            .routers
+            .get(connection_name)
             .ok_or_else(|| anyhow!("Connection '{}' not found", connection_name))?;
         Ok(router.get_stats().await)
     }
@@ -590,8 +630,14 @@ impl WSManager {
         result
     }
 
-    pub async fn configure_connection(&self, _connection_name: &str, _config: ConnectionConfig) -> Result<()> {
-        Err(anyhow!("Dynamic configuration not yet supported. Please recreate the connection with the desired configuration."))
+    pub async fn configure_connection(
+        &self,
+        _connection_name: &str,
+        _config: ConnectionConfig,
+    ) -> Result<()> {
+        Err(anyhow!(
+            "Dynamic configuration not yet supported. Please recreate the connection with the desired configuration."
+        ))
     }
 }
 
@@ -800,7 +846,7 @@ mod test {
     async fn test_ping_tracker_edge_cases() {
         // This test covers edge cases including boundary timeouts, rapid cycles,
         // various payload sizes, and state consistency after timeouts
-        use tokio::time::{sleep, Duration};
+        use tokio::time::{Duration, sleep};
 
         let mut tracker = SimplePingTracker::new(Duration::from_millis(1));
         tracker.send_ping(vec![1]);
@@ -855,7 +901,12 @@ mod test {
 
         let result = conn.write(Message::Text("test".into())).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Connection write stream not initialized"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Connection write stream not initialized")
+        );
     }
 
     #[tokio::test]
@@ -875,7 +926,12 @@ mod test {
 
         let result = conn.ping_loop().await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Connection write stream not initialized for ping loop"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Connection write stream not initialized for ping loop")
+        );
     }
 
     #[tokio::test]
@@ -895,7 +951,12 @@ mod test {
 
         let result = conn.read_loop().await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Connection read stream not initialized for read loop"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Connection read stream not initialized for read loop")
+        );
     }
 
     #[tokio::test]
@@ -1041,13 +1102,19 @@ mod test {
             }
         });
 
-        let event_subscription_id = manager.subscribe_connection_events("test_conn", event_handler).await.unwrap();
+        let event_subscription_id = manager
+            .subscribe_connection_events("test_conn", event_handler)
+            .await
+            .unwrap();
 
         // Test message routing directly through the router
         let router = manager.routers.get("test_conn").unwrap();
         router.route_text_message("Hello, World!").await.unwrap();
         router.route_text_message("Another message").await.unwrap();
-        router.route_connection_event(crate::routing::ConnectionEvent::Connected).await.unwrap();
+        router
+            .route_connection_event(crate::routing::ConnectionEvent::Connected)
+            .await
+            .unwrap();
 
         // Give some time for async handlers to execute
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1064,21 +1131,29 @@ mod test {
 
         // Test unsubscription
         manager.unsubscribe("test_conn", subscription_id).unwrap();
-        
+
         // Route another message - should not increment counter
-        router.route_text_message("After unsubscribe").await.unwrap();
+        router
+            .route_text_message("After unsubscribe")
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
-        
+
         // Message count should remain the same
         assert_eq!(message_count.load(Ordering::Relaxed), 2);
-        
+
         // But connection events should still work
-        router.route_connection_event(crate::routing::ConnectionEvent::Disconnected).await.unwrap();
+        router
+            .route_connection_event(crate::routing::ConnectionEvent::Disconnected)
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(connection_event_count.load(Ordering::Relaxed), 2);
 
         // Clean up remaining subscription
-        manager.unsubscribe("test_conn", event_subscription_id).unwrap();
+        manager
+            .unsubscribe("test_conn", event_subscription_id)
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1086,9 +1161,9 @@ mod test {
         // This test verifies backpressure policies work correctly
         use std::sync::atomic::{AtomicUsize, Ordering};
         use tokio::time::Duration;
-        
+
         let manager = WSManager::new();
-        
+
         // Create a connection with custom backpressure configuration
         let router_config = crate::routing::ConnectionConfig {
             backpressure_policy: crate::routing::BackpressurePolicy::DropNewest,
@@ -1105,12 +1180,14 @@ mod test {
             write_on_init: Vec::new(),
         };
         let hooks = ReadHooks::new();
-        manager.new_conn_with_router_config("backpressure_test", config, hooks, router_config).await;
+        manager
+            .new_conn_with_router_config("backpressure_test", config, hooks, router_config)
+            .await;
 
         // Create a slow handler to test backpressure
         let processed_count = Arc::new(AtomicUsize::new(0));
         let processed_count_clone = Arc::clone(&processed_count);
-        
+
         let slow_handler = crate::routing::AsyncHandler::new(move |_text: Arc<str>| {
             let count = Arc::clone(&processed_count_clone);
             async move {
@@ -1120,12 +1197,18 @@ mod test {
             }
         });
 
-        manager.subscribe("backpressure_test", slow_handler).await.unwrap();
+        manager
+            .subscribe("backpressure_test", slow_handler)
+            .await
+            .unwrap();
 
         // Send many messages quickly to trigger backpressure
         let router = manager.routers.get("backpressure_test").unwrap();
         for i in 0..10 {
-            router.route_text_message(&format!("Message {}", i)).await.unwrap();
+            router
+                .route_text_message(&format!("Message {}", i))
+                .await
+                .unwrap();
         }
 
         // Wait for processing
@@ -1140,12 +1223,12 @@ mod test {
         assert!(final_stats.total_processed <= 10);
     }
 
-    #[tokio::test] 
+    #[tokio::test]
     async fn test_multiple_subscribers() {
         // This test verifies that multiple subscribers can receive the same messages
         use std::sync::atomic::{AtomicUsize, Ordering};
         use tokio::time::Duration;
-        
+
         let manager = WSManager::new();
 
         let config = Config {
@@ -1167,19 +1250,25 @@ mod test {
         let count1_clone = Arc::clone(&count1);
         let handler1 = crate::routing::AsyncHandler::new(move |_text: Arc<str>| {
             let count = Arc::clone(&count1_clone);
-            async move { count.fetch_add(1, Ordering::Relaxed); }
+            async move {
+                count.fetch_add(1, Ordering::Relaxed);
+            }
         });
 
         let count2_clone = Arc::clone(&count2);
         let handler2 = crate::routing::AsyncHandler::new(move |_text: Arc<str>| {
             let count = Arc::clone(&count2_clone);
-            async move { count.fetch_add(1, Ordering::Relaxed); }
+            async move {
+                count.fetch_add(1, Ordering::Relaxed);
+            }
         });
 
         let count3_clone = Arc::clone(&count3);
         let handler3 = crate::routing::AsyncHandler::new(move |_text: Arc<str>| {
             let count = Arc::clone(&count3_clone);
-            async move { count.fetch_add(1, Ordering::Relaxed); }
+            async move {
+                count.fetch_add(1, Ordering::Relaxed);
+            }
         });
 
         // Subscribe all handlers
@@ -1189,7 +1278,10 @@ mod test {
 
         // Send a message
         let router = manager.routers.get("multi_test").unwrap();
-        router.route_text_message("Broadcast message").await.unwrap();
+        router
+            .route_text_message("Broadcast message")
+            .await
+            .unwrap();
 
         // Wait for processing
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1239,24 +1331,49 @@ mod test {
 
         // Subscribe to each connection separately
         let conn1_count_clone = Arc::clone(&conn1_count);
-        let _sub1 = manager.subscribe("conn1", crate::routing::AsyncHandler::new(move |_text: Arc<str>| {
-            let count = Arc::clone(&conn1_count_clone);
-            async move { count.fetch_add(1, Ordering::Relaxed); }
-        })).await.unwrap();
+        let _sub1 = manager
+            .subscribe(
+                "conn1",
+                crate::routing::AsyncHandler::new(move |_text: Arc<str>| {
+                    let count = Arc::clone(&conn1_count_clone);
+                    async move {
+                        count.fetch_add(1, Ordering::Relaxed);
+                    }
+                }),
+            )
+            .await
+            .unwrap();
 
         let conn2_count_clone = Arc::clone(&conn2_count);
-        let _sub2 = manager.subscribe("conn2", crate::routing::AsyncHandler::new(move |_text: Arc<str>| {
-            let count = Arc::clone(&conn2_count_clone);
-            async move { count.fetch_add(1, Ordering::Relaxed); }
-        })).await.unwrap();
+        let _sub2 = manager
+            .subscribe(
+                "conn2",
+                crate::routing::AsyncHandler::new(move |_text: Arc<str>| {
+                    let count = Arc::clone(&conn2_count_clone);
+                    async move {
+                        count.fetch_add(1, Ordering::Relaxed);
+                    }
+                }),
+            )
+            .await
+            .unwrap();
 
         // Send messages to each connection's router directly
         let router1 = manager.routers.get("conn1").unwrap();
         let router2 = manager.routers.get("conn2").unwrap();
 
-        router1.route_text_message("message for conn1").await.unwrap();
-        router1.route_text_message("another message for conn1").await.unwrap();
-        router2.route_text_message("message for conn2").await.unwrap();
+        router1
+            .route_text_message("message for conn1")
+            .await
+            .unwrap();
+        router1
+            .route_text_message("another message for conn1")
+            .await
+            .unwrap();
+        router2
+            .route_text_message("message for conn2")
+            .await
+            .unwrap();
 
         // Wait for processing
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1268,7 +1385,7 @@ mod test {
         // Verify separate statistics
         let stats1 = manager.get_connection_stats("conn1").await.unwrap();
         let stats2 = manager.get_connection_stats("conn2").await.unwrap();
-        
+
         assert_eq!(stats1.total_received, 2);
         assert_eq!(stats2.total_received, 1);
     }
@@ -1287,23 +1404,40 @@ mod test {
             write_on_init: Vec::new(),
         };
 
-        manager.new_conn("error_conn", config, ReadHooks::new()).await;
+        manager
+            .new_conn("error_conn", config, ReadHooks::new())
+            .await;
 
         // Test subscribing to non-existent connection
         let handler = crate::routing::AsyncHandler::new(|_text: Arc<str>| async move {});
         let result = manager.subscribe("nonexistent", handler).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Connection 'nonexistent' not found"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Connection 'nonexistent' not found")
+        );
 
         // Test unsubscribing non-existent subscription
         let result = manager.unsubscribe("error_conn", 999);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Subscription 999 not found"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Subscription 999 not found")
+        );
 
         // Test getting stats for non-existent connection
         let result = manager.get_connection_stats("nonexistent").await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Connection 'nonexistent' not found"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Connection 'nonexistent' not found")
+        );
     }
 
     #[tokio::test]
@@ -1322,7 +1456,9 @@ mod test {
             write_on_init: Vec::new(),
         };
 
-        manager.new_conn("concurrent_conn", config, ReadHooks::new()).await;
+        manager
+            .new_conn("concurrent_conn", config, ReadHooks::new())
+            .await;
 
         let processed_count = Arc::new(AtomicUsize::new(0));
         let mut subscription_ids = Vec::new();
@@ -1332,7 +1468,7 @@ mod test {
         for i in 0..50 {
             let manager_clone = manager.clone();
             let processed_count_clone = Arc::clone(&processed_count);
-            
+
             let handle = tokio::spawn(async move {
                 let handler = crate::routing::AsyncHandler::new(move |text: Arc<str>| {
                     let count = Arc::clone(&processed_count_clone);
@@ -1343,7 +1479,7 @@ mod test {
                         log::debug!("Processed message {} in handler {}", text, i);
                     }
                 });
-                
+
                 manager_clone.subscribe("concurrent_conn", handler).await
             });
             handles.push(handle);
@@ -1359,7 +1495,10 @@ mod test {
 
         // Send a message - should reach all 50 handlers
         let router = manager.routers.get("concurrent_conn").unwrap();
-        router.route_text_message("broadcast message").await.unwrap();
+        router
+            .route_text_message("broadcast message")
+            .await
+            .unwrap();
 
         // Wait for all handlers to process
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -1411,7 +1550,9 @@ mod test {
             write_on_init: Vec::new(),
         };
 
-        manager.new_conn("event_conn", config, ReadHooks::new()).await;
+        manager
+            .new_conn("event_conn", config, ReadHooks::new())
+            .await;
 
         let event_count = Arc::new(AtomicUsize::new(0));
         let received_events = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
@@ -1419,21 +1560,41 @@ mod test {
         // Subscribe to connection events
         let event_count_clone = Arc::clone(&event_count);
         let received_events_clone = Arc::clone(&received_events);
-        let _event_sub = manager.subscribe_connection_events("event_conn", crate::routing::AsyncHandler::new(move |event_json: Arc<str>| {
-            let count = Arc::clone(&event_count_clone);
-            let events = Arc::clone(&received_events_clone);
-            async move {
-                count.fetch_add(1, Ordering::Relaxed);
-                events.lock().await.push(event_json.to_string());
-            }
-        })).await.unwrap();
+        let _event_sub = manager
+            .subscribe_connection_events(
+                "event_conn",
+                crate::routing::AsyncHandler::new(move |event_json: Arc<str>| {
+                    let count = Arc::clone(&event_count_clone);
+                    let events = Arc::clone(&received_events_clone);
+                    async move {
+                        count.fetch_add(1, Ordering::Relaxed);
+                        events.lock().await.push(event_json.to_string());
+                    }
+                }),
+            )
+            .await
+            .unwrap();
 
         // Route various connection events
         let router = manager.routers.get("event_conn").unwrap();
-        router.route_connection_event(crate::routing::ConnectionEvent::Connected).await.unwrap();
-        router.route_connection_event(crate::routing::ConnectionEvent::Disconnected).await.unwrap();
-        router.route_connection_event(crate::routing::ConnectionEvent::Reconnecting).await.unwrap();
-        router.route_connection_event(crate::routing::ConnectionEvent::Error("Test error".to_string())).await.unwrap();
+        router
+            .route_connection_event(crate::routing::ConnectionEvent::Connected)
+            .await
+            .unwrap();
+        router
+            .route_connection_event(crate::routing::ConnectionEvent::Disconnected)
+            .await
+            .unwrap();
+        router
+            .route_connection_event(crate::routing::ConnectionEvent::Reconnecting)
+            .await
+            .unwrap();
+        router
+            .route_connection_event(crate::routing::ConnectionEvent::Error(
+                "Test error".to_string(),
+            ))
+            .await
+            .unwrap();
 
         // Wait for processing
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1447,13 +1608,15 @@ mod test {
 
         // Check        // This test verifies that events can be deserialized back
         for event_json in events.iter() {
-            let parsed: Result<crate::routing::ConnectionEvent, _> = serde_json::from_str(event_json);
+            let parsed: Result<crate::routing::ConnectionEvent, _> =
+                serde_json::from_str(event_json);
             assert!(parsed.is_ok(), "Failed to parse event: {}", event_json);
         }
 
         // Verify specific event content
         let connected_event = &events[0];
-        let parsed: crate::routing::ConnectionEvent = serde_json::from_str(connected_event).unwrap();
+        let parsed: crate::routing::ConnectionEvent =
+            serde_json::from_str(connected_event).unwrap();
         assert!(matches!(parsed, crate::routing::ConnectionEvent::Connected));
 
         let error_event = &events[3];
@@ -1481,34 +1644,58 @@ mod test {
             write_on_init: Vec::new(),
         };
 
-        manager.new_conn("mixed_conn", config, ReadHooks::new()).await;
+        manager
+            .new_conn("mixed_conn", config, ReadHooks::new())
+            .await;
 
         let text_count = Arc::new(AtomicUsize::new(0));
         let event_count = Arc::new(AtomicUsize::new(0));
 
         // Subscribe to both text messages and connection events
         let text_count_clone = Arc::clone(&text_count);
-        let _text_sub = manager.subscribe("mixed_conn", crate::routing::AsyncHandler::new(move |_text: Arc<str>| {
-            let count = Arc::clone(&text_count_clone);
-            async move { count.fetch_add(1, Ordering::Relaxed); }
-        })).await.unwrap();
+        let _text_sub = manager
+            .subscribe(
+                "mixed_conn",
+                crate::routing::AsyncHandler::new(move |_text: Arc<str>| {
+                    let count = Arc::clone(&text_count_clone);
+                    async move {
+                        count.fetch_add(1, Ordering::Relaxed);
+                    }
+                }),
+            )
+            .await
+            .unwrap();
 
         let event_count_clone = Arc::clone(&event_count);
-        let _event_sub = manager.subscribe_connection_events("mixed_conn", crate::routing::AsyncHandler::new(move |_event: Arc<str>| {
-            let count = Arc::clone(&event_count_clone);
-            async move { count.fetch_add(1, Ordering::Relaxed); }
-        })).await.unwrap();
+        let _event_sub = manager
+            .subscribe_connection_events(
+                "mixed_conn",
+                crate::routing::AsyncHandler::new(move |_event: Arc<str>| {
+                    let count = Arc::clone(&event_count_clone);
+                    async move {
+                        count.fetch_add(1, Ordering::Relaxed);
+                    }
+                }),
+            )
+            .await
+            .unwrap();
 
         // Route both types of messages
         let router = manager.routers.get("mixed_conn").unwrap();
-        
+
         // Send text messages
         router.route_text_message("text message 1").await.unwrap();
         router.route_text_message("text message 2").await.unwrap();
-        
+
         // Send connection events
-        router.route_connection_event(crate::routing::ConnectionEvent::Connected).await.unwrap();
-        router.route_connection_event(crate::routing::ConnectionEvent::Disconnected).await.unwrap();
+        router
+            .route_connection_event(crate::routing::ConnectionEvent::Connected)
+            .await
+            .unwrap();
+        router
+            .route_connection_event(crate::routing::ConnectionEvent::Disconnected)
+            .await
+            .unwrap();
 
         // Wait for processing
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1542,7 +1729,9 @@ mod test {
             write_on_init: Vec::new(),
         };
 
-        manager.new_conn("lifecycle_conn", config, ReadHooks::new()).await;
+        manager
+            .new_conn("lifecycle_conn", config, ReadHooks::new())
+            .await;
 
         let processed_count = Arc::new(AtomicUsize::new(0));
 
@@ -1552,19 +1741,35 @@ mod test {
 
         // Add first subscription
         let processed_count_clone = Arc::clone(&processed_count);
-        let sub1 = manager.subscribe("lifecycle_conn", crate::routing::AsyncHandler::new(move |_text: Arc<str>| {
-            let count = Arc::clone(&processed_count_clone);
-            async move { count.fetch_add(1, Ordering::Relaxed); }
-        })).await.unwrap();
+        let sub1 = manager
+            .subscribe(
+                "lifecycle_conn",
+                crate::routing::AsyncHandler::new(move |_text: Arc<str>| {
+                    let count = Arc::clone(&processed_count_clone);
+                    async move {
+                        count.fetch_add(1, Ordering::Relaxed);
+                    }
+                }),
+            )
+            .await
+            .unwrap();
 
         assert_eq!(router.subscription_count(), 1);
 
         // Add second subscription
         let processed_count_clone = Arc::clone(&processed_count);
-        let sub2 = manager.subscribe("lifecycle_conn", crate::routing::AsyncHandler::new(move |_text: Arc<str>| {
-            let count = Arc::clone(&processed_count_clone);
-            async move { count.fetch_add(10, Ordering::Relaxed); }
-        })).await.unwrap();
+        let sub2 = manager
+            .subscribe(
+                "lifecycle_conn",
+                crate::routing::AsyncHandler::new(move |_text: Arc<str>| {
+                    let count = Arc::clone(&processed_count_clone);
+                    async move {
+                        count.fetch_add(10, Ordering::Relaxed);
+                    }
+                }),
+            )
+            .await
+            .unwrap();
 
         assert_eq!(router.subscription_count(), 2);
 
