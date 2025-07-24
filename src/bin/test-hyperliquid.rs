@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use kharbranth::{AsyncHandler, Config, ReadHooks, WSManager};
+use kharbranth::{Config, HookType, WSManager};
 use log::info;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
@@ -27,8 +27,7 @@ async fn main() -> Result<()> {
     env_logger::init();
     info!("Starting Hyperliquid WebSocket test");
 
-    let manager = WSManager::new();
-    let hooks = ReadHooks::new();
+    let mut manager = WSManager::new();
 
     let subscription = HyperliquidSubscriptionMessage {
         typ: "candle".to_string(),
@@ -52,44 +51,19 @@ async fn main() -> Result<()> {
         write_on_init: vec![Message::Text(subscribe_json.into())],
     };
 
-    manager.new_conn("hyperliquid", config, hooks).await;
+    manager.new_conn("hyperliquid", config).await;
 
-    let _text_subscription = manager
-        .subscribe(
-            "hyperliquid",
-            AsyncHandler::new(|text| async move {
-                info!("Received candle data: {}", text);
-                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
-                    info!("Parsed JSON: {}", parsed);
-                }
-            }),
-        )
-        .await?;
+    let text_hook = HookType::Text(Box::new(|text| {
+        info!("Received candle data: {}", text);
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
+            info!("Parsed JSON: {}", parsed);
+        };
+    }));
 
-    let _event_subscription = manager
-        .subscribe_connection_events(
-            "hyperliquid",
-            AsyncHandler::new(|event| async move {
-                info!("Connection event: {}", event);
-            }),
-        )
-        .await?;
+    manager.add_hook("hyperliquid", text_hook).await;
 
     let (tx, _rx) = broadcast::channel(16);
     let _handles = manager.start(tx.clone());
-
-    let manager_clone = manager.clone();
-    tokio::spawn(async move {
-        loop {
-            sleep(Duration::from_secs(30)).await;
-            if let Ok(stats) = manager_clone.get_connection_stats("hyperliquid").await {
-                info!(
-                    "Stats - Received: {}, Processed: {}, Dropped: {}",
-                    stats.total_received, stats.total_processed, stats.total_dropped
-                );
-            }
-        }
-    });
 
     let tx_clone = tx.clone();
     tokio::spawn(async move {
