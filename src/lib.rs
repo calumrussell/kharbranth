@@ -33,6 +33,15 @@ pub use routing::{
     MessageHandler, QueueStats, SubscriptionId,
 };
 
+pub enum HookType {
+    Text(Utf8BytesFunc),
+    Binary(BytesFunc),
+    Ping(BytesFunc),
+    Pong(BytesFunc),
+    Close(CloseFrameFunc),
+    Frame(FrameFunc),
+}
+
 type BytesFunc = Option<Box<dyn Fn(Bytes) + Send + Sync>>;
 type Utf8BytesFunc = Option<Box<dyn Fn(Utf8Bytes) + Send + Sync>>;
 type CloseFrameFunc = Option<Box<dyn Fn(Option<CloseFrame>) + Send + Sync>>;
@@ -56,6 +65,17 @@ impl ReadHooks {
             on_pong: Arc::new(None),
             on_close: Arc::new(None),
             on_frame: Arc::new(None),
+        }
+    }
+
+    pub fn add_hook(&mut self, hook: HookType) {
+        match hook {
+            HookType::Text(func) => self.on_text = Arc::new(func),
+            HookType::Binary(func) => self.on_binary = Arc::new(func),
+            HookType::Ping(func) => self.on_ping = Arc::new(func),
+            HookType::Pong(func) => self.on_pong = Arc::new(func),
+            HookType::Close(func) => self.on_close = Arc::new(func),
+            HookType::Frame(func) => self.on_frame = Arc::new(func),
         }
     }
 }
@@ -161,7 +181,6 @@ pub struct Connection<S> {
     pub read: Option<ReadStream<S>>,
     pub write: Option<WriteStream<S>>,
     pub hooks: ReadHooks,
-    pub router: Option<Arc<routing::ConnectionRouter>>,
     ping_tracker: Arc<RwLock<SimplePingTracker>>,
 }
 
@@ -231,7 +250,6 @@ where
         let on_pong_clone = Arc::clone(&self.hooks.on_pong);
         let on_close_clone = Arc::clone(&self.hooks.on_close);
         let on_frame_clone = Arc::clone(&self.hooks.on_frame);
-        let router_clone = self.router.clone();
 
         Ok(tokio::spawn(async move {
             loop {
@@ -289,6 +307,10 @@ where
         }))
     }
 
+    pub fn add_hook(&mut self, hook: HookType) {
+        self.hooks.add_hook(hook);
+    }
+
     pub fn new(config: Config, hooks: ReadHooks) -> Self {
         let ping_timeout = Duration::from_secs(config.ping_timeout);
         Self {
@@ -296,23 +318,6 @@ where
             read: None,
             write: None,
             hooks,
-            router: None,
-            ping_tracker: Arc::new(RwLock::new(SimplePingTracker::new(ping_timeout))),
-        }
-    }
-
-    pub fn new_with_router(
-        config: Config,
-        hooks: ReadHooks,
-        router: Arc<routing::ConnectionRouter>,
-    ) -> Self {
-        let ping_timeout = Duration::from_secs(config.ping_timeout);
-        Self {
-            config,
-            read: None,
-            write: None,
-            hooks,
-            router: Some(router),
             ping_tracker: Arc::new(RwLock::new(SimplePingTracker::new(ping_timeout))),
         }
     }
@@ -396,7 +401,6 @@ type ConnectionType = Connection<tokio_tungstenite::MaybeTlsStream<tokio::net::T
 
 pub struct WSManager {
     conn: Arc<DashMap<String, Arc<RwLock<ConnectionType>>>>,
-    routers: Arc<DashMap<String, Arc<routing::ConnectionRouter>>>,
 }
 
 impl Default for WSManager {
@@ -409,7 +413,6 @@ impl Clone for WSManager {
     fn clone(&self) -> Self {
         Self {
             conn: Arc::clone(&self.conn),
-            routers: Arc::clone(&self.routers),
         }
     }
 }
@@ -418,29 +421,14 @@ impl WSManager {
     pub fn new() -> Self {
         Self {
             conn: Arc::new(DashMap::new()),
-            routers: Arc::new(DashMap::new()),
         }
     }
 
-    pub async fn new_conn(&self, name: &str, config: Config, hooks: ReadHooks) {
-        self.new_conn_with_router_config(name, config, hooks, routing::ConnectionConfig::default())
-            .await;
-    }
-
-    pub async fn new_conn_with_router_config(
-        &self,
-        name: &str,
-        config: Config,
-        hooks: ReadHooks,
-        router_config: routing::ConnectionConfig,
-    ) {
-        let router = Arc::new(routing::ConnectionRouter::new(router_config));
-
-        let conn = Connection::new_with_router(config, hooks, Arc::clone(&router));
-
-        self.conn
-            .insert(name.to_string(), Arc::new(RwLock::new(conn)));
-        self.routers.insert(name.to_string(), router);
+    pub async fn add_hook(&mut self, name: &str, hook: HookType) {
+        if let Some(conn) = self.conn.get(name) {
+            let mut conn_lock = conn.write().await;
+            conn_lock.add_hook(hook);
+        }
     }
 
     pub fn start(
@@ -551,25 +539,6 @@ impl WSManager {
         Err(anyhow!(ConnectionError::ConnectionNotFound(
             name.to_string()
         )))
-    }
-
-    pub async fn get_connection_stats(&self, connection_name: &str) -> Result<QueueStats> {
-        let router = self
-            .routers
-            .get(connection_name)
-            .ok_or_else(|| anyhow!("Connection '{}' not found", connection_name))?;
-        Ok(router.get_stats().await)
-    }
-
-    pub async fn get_all_stats(&self) -> HashMap<String, QueueStats> {
-        let mut result = HashMap::new();
-        for entry in self.routers.iter() {
-            let name = entry.key().clone();
-            let router = entry.value();
-            let stats = router.get_stats().await;
-            result.insert(name, stats);
-        }
-        result
     }
 }
 
