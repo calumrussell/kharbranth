@@ -193,8 +193,6 @@ struct Subscription {
 }
 
 pub struct ConnectionRouter {
-    text_subscriptions: Arc<DashMap<SubscriptionId, Subscription>>,
-    connection_event_subscriptions: Arc<DashMap<SubscriptionId, Subscription>>,
     config: ConnectionConfig,
     next_id: AtomicUsize,
     stats: Arc<AtomicStats>,
@@ -203,170 +201,14 @@ pub struct ConnectionRouter {
 impl ConnectionRouter {
     pub fn new(config: ConnectionConfig) -> Self {
         Self {
-            text_subscriptions: Arc::new(DashMap::new()),
-            connection_event_subscriptions: Arc::new(DashMap::new()),
             config,
             next_id: AtomicUsize::new(0),
             stats: Arc::new(AtomicStats::new()),
         }
     }
 
-    pub async fn subscribe_text<H>(&self, handler: H) -> Result<SubscriptionId>
-    where
-        H: MessageHandler + 'static,
-    {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let handler = Arc::new(handler);
-
-        let queue = Arc::new(BackpressureQueue::new(
-            self.config.max_pending_messages,
-            self.config.backpressure_policy,
-        ));
-
-        let subscription = Subscription {
-            id,
-            handler: handler.clone(),
-            queue: Arc::clone(&queue),
-        };
-
-        self.text_subscriptions.insert(id, subscription);
-
-        let stats = Arc::clone(&self.stats);
-        tokio::spawn(async move {
-            loop {
-                if let Some(text) = queue.recv().await {
-                    handler.handle_text(text).await;
-
-                    stats.total_processed.fetch_add(1, Ordering::Relaxed);
-                    stats.pending.fetch_sub(1, Ordering::Relaxed);
-                } else {
-                    break;
-                }
-            }
-            debug!("Text subscription {} handler task completed", id);
-        });
-
-        debug!("Added text subscription {}", id);
-        Ok(id)
-    }
-
-    pub async fn subscribe_connection_events<H>(&self, handler: H) -> Result<SubscriptionId>
-    where
-        H: MessageHandler + 'static,
-    {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let handler = Arc::new(handler);
-
-        let queue = Arc::new(BackpressureQueue::new(
-            100, // Connection events use smaller queue
-            self.config.backpressure_policy,
-        ));
-
-        let subscription = Subscription {
-            id,
-            handler: handler.clone(),
-            queue: Arc::clone(&queue),
-        };
-
-        self.connection_event_subscriptions.insert(id, subscription);
-
-        tokio::spawn(async move {
-            loop {
-                if let Some(event_json) = queue.recv().await {
-                    handler.handle_text(event_json).await;
-                } else {
-                    break;
-                }
-            }
-            debug!(
-                "Connection event subscription {} handler task completed",
-                id
-            );
-        });
-
-        debug!("Added connection event subscription {}", id);
-        Ok(id)
-    }
-
-    pub fn unsubscribe(&self, subscription_id: SubscriptionId) -> bool {
-        let removed_text = self.text_subscriptions.remove(&subscription_id).is_some();
-        let removed_connection = self
-            .connection_event_subscriptions
-            .remove(&subscription_id)
-            .is_some();
-        removed_text || removed_connection
-    }
-
-    pub async fn route_text_message(&self, text: &str) -> Result<()> {
-        self.stats.total_received.fetch_add(1, Ordering::Relaxed);
-
-        let mut _messages_sent = 0;
-        let mut messages_dropped = 0;
-        let shared_text: Arc<str> = text.into();
-
-        for entry in self.text_subscriptions.iter() {
-            let subscription = entry.value();
-
-            match subscription.queue.send(Arc::clone(&shared_text)).await {
-                Ok(true) => {
-                    _messages_sent += 1;
-                    self.stats.pending.fetch_add(1, Ordering::Relaxed);
-                }
-                Ok(false) => {
-                    // Message was dropped due to backpressure policy
-                    messages_dropped += 1;
-                    warn!(
-                        "Message dropped for subscription {} due to backpressure",
-                        subscription.id
-                    );
-                }
-                Err(e) => {
-                    return Err(e);
-                }
-            }
-        }
-
-        if messages_dropped > 0 {
-            self.stats
-                .total_dropped
-                .fetch_add(messages_dropped, Ordering::Relaxed);
-        }
-
-        Ok(())
-    }
-
-    pub async fn route_connection_event(&self, event: ConnectionEvent) -> Result<()> {
-        let event_json = serde_json::to_string(&event)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize connection event: {}", e))?;
-        let shared_event: Arc<str> = event_json.into();
-
-        for entry in self.connection_event_subscriptions.iter() {
-            let subscription = entry.value();
-
-            match subscription.queue.send(Arc::clone(&shared_event)).await {
-                Ok(true) => {
-                    debug!("Sent connection event to subscription {}", subscription.id);
-                }
-                Ok(false) => {
-                    warn!(
-                        "Connection event dropped for subscription {} due to backpressure",
-                        subscription.id
-                    );
-                }
-                Err(e) => {
-                    return Err(e);
-                }
-            }
-        }
-
-        Ok(())
-    }
-
     pub async fn get_stats(&self) -> QueueStats {
         self.stats.get_snapshot()
     }
 
-    pub fn subscription_count(&self) -> usize {
-        self.text_subscriptions.len() + self.connection_event_subscriptions.len()
-    }
 }

@@ -245,11 +245,6 @@ where
                                     if let Some(on_text_func) = on_text_clone.as_ref() {
                                         on_text_func(text.clone());
                                     }
-                                    if let Some(ref router) = router_clone {
-                                        if let Err(e) = router.route_text_message(&text).await {
-                                            error!("Failed to route text message: {}", e);
-                                        }
-                                    }
                                 }
                                 Message::Binary(binary) => {
                                     if let Some(on_binary_func) = on_binary_clone.as_ref() {
@@ -274,16 +269,6 @@ where
                                 Message::Close(maybe_frame) => {
                                     if let Some(on_close_func) = on_close_clone.as_ref() {
                                         on_close_func(maybe_frame);
-                                    }
-                                    if let Some(ref router) = router_clone {
-                                        if let Err(e) = router
-                                            .route_connection_event(
-                                                routing::ConnectionEvent::Disconnected,
-                                            )
-                                            .await
-                                        {
-                                            error!("Failed to route connection event: {}", e);
-                                        }
                                     }
                                     return Err(anyhow!(ConnectionError::CloseFrameReceived));
                                 }
@@ -568,49 +553,6 @@ impl WSManager {
         )))
     }
 
-    pub async fn subscribe<H>(&self, connection_name: &str, handler: H) -> Result<SubscriptionId>
-    where
-        H: MessageHandler + 'static,
-    {
-        let router = self
-            .routers
-            .get(connection_name)
-            .ok_or_else(|| anyhow!("Connection '{}' not found", connection_name))?;
-        router.subscribe_text(handler).await
-    }
-
-    pub async fn subscribe_connection_events<H>(
-        &self,
-        connection_name: &str,
-        handler: H,
-    ) -> Result<SubscriptionId>
-    where
-        H: MessageHandler + 'static,
-    {
-        let router = self
-            .routers
-            .get(connection_name)
-            .ok_or_else(|| anyhow!("Connection '{}' not found", connection_name))?;
-        router.subscribe_connection_events(handler).await
-    }
-
-    pub fn unsubscribe(
-        &self,
-        connection_name: &str,
-        subscription_id: SubscriptionId,
-    ) -> Result<()> {
-        let router = self
-            .routers
-            .get(connection_name)
-            .ok_or_else(|| anyhow!("Connection '{}' not found", connection_name))?;
-
-        if router.unsubscribe(subscription_id) {
-            Ok(())
-        } else {
-            Err(anyhow!("Subscription {} not found", subscription_id))
-        }
-    }
-
     pub async fn get_connection_stats(&self, connection_name: &str) -> Result<QueueStats> {
         let router = self
             .routers
@@ -628,16 +570,6 @@ impl WSManager {
             result.insert(name, stats);
         }
         result
-    }
-
-    pub async fn configure_connection(
-        &self,
-        _connection_name: &str,
-        _config: ConnectionConfig,
-    ) -> Result<()> {
-        Err(anyhow!(
-            "Dynamic configuration not yet supported. Please recreate the connection with the desired configuration."
-        ))
     }
 }
 
