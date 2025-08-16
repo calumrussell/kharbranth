@@ -233,11 +233,14 @@ impl WSManager {
 
     pub async fn write(&self, name: &str, msg: Message) -> ConnectionResult {
         if let Some(conn) = self.conn.get(name) {
+            let msg_debug = format!("{:?}", msg);
             let mut locked_conn = conn.write().await;
-            return locked_conn.write(msg).await;
+            return locked_conn.write(msg).await.map_err(|e| {
+                anyhow!("Failed to write message to connection '{}': {} (message: {})", name, e, msg_debug)
+            });
         }
         Err(anyhow!(ConnectionError::ConnectionNotFound(
-            name.to_string()
+            format!("Connection '{}' not found when attempting to write message: {:?}", name, msg)
         )))
     }
 }
