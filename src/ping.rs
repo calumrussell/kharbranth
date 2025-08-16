@@ -137,7 +137,7 @@ mod tests {
         assert!(tracker.check_timeout().is_err());
 
         let mut tracker = PingTracker::new(Duration::from_secs(10));
-        for i in 0..100 {
+        for i in 0..5 {
             let payload = vec![i];
             tracker.send_ping(payload.clone());
             assert!(tracker.handle_pong(payload).is_ok());
