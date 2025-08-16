@@ -4,7 +4,6 @@ use anyhow::Result;
 use kharbranth::{Config, HookType, WSManager};
 use log::info;
 use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast;
 use tokio::time::sleep;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -62,18 +61,14 @@ async fn main() -> Result<()> {
 
     manager.add_hook("hyperliquid", text_hook).await;
 
-    let (tx, _rx) = broadcast::channel(16);
-    let _handles = manager.start(tx.clone());
+    let _handles = manager.start();
 
-    let tx_clone = tx.clone();
+    let manager_clone = manager.clone();
     tokio::spawn(async move {
         loop {
             sleep(Duration::from_secs(20)).await;
             info!("Sending restart signal to hyperliquid connection");
-            if let Err(e) = tx_clone.send(kharbranth::BroadcastMessage {
-                target: "hyperliquid".to_string(),
-                action: 0,
-            }) {
+            if let Err(e) = manager_clone.restart("hyperliquid") {
                 info!("Failed to send restart signal: {}", e);
             }
         }

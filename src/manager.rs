@@ -21,6 +21,7 @@ type ConnectionType = Connection<tokio_tungstenite::MaybeTlsStream<tokio::net::T
 
 pub struct WSManager {
     pub conn: Arc<DashMap<String, Arc<RwLock<ConnectionType>>>>,
+    restart_tx: broadcast::Sender<BroadcastMessage>,
 }
 
 impl Default for WSManager {
@@ -33,14 +34,17 @@ impl Clone for WSManager {
     fn clone(&self) -> Self {
         Self {
             conn: Arc::clone(&self.conn),
+            restart_tx: self.restart_tx.clone(),
         }
     }
 }
 
 impl WSManager {
     pub fn new() -> Self {
+        let (restart_tx, _) = broadcast::channel(16);
         Self {
             conn: Arc::new(DashMap::new()),
+            restart_tx,
         }
     }
 
@@ -152,16 +156,13 @@ impl WSManager {
         }
     }
 
-    pub fn start(
-        &self,
-        tx: broadcast::Sender<BroadcastMessage>,
-    ) -> HashMap<String, JoinHandle<()>> {
+    pub fn start(&self) -> HashMap<String, JoinHandle<()>> {
         let mut res = HashMap::with_capacity(self.conn.len());
 
         for entry in &*self.conn {
             let name = entry.key().clone();
             let conn = Arc::clone(entry.value());
-            let tx = tx.clone();
+            let tx = self.restart_tx.clone();
 
             let name_for_task = name.clone();
             let manager_handle = tokio::spawn(async move {
@@ -171,6 +172,15 @@ impl WSManager {
             res.insert(name, manager_handle);
         }
         res
+    }
+
+    pub fn restart(&self, name: &str) -> Result<(), Error> {
+        let msg = BroadcastMessage {
+            target: name.to_string(),
+            action: 0, // BroadcastMessageType::Restart
+        };
+        self.restart_tx.send(msg).map_err(|e| anyhow!("Failed to send restart signal: {}", e))?;
+        Ok(())
     }
 
     pub async fn write(&self, name: &str, msg: Message) -> ConnectionResult {
