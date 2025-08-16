@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use kharbranth::{Config, HookType, WSManager};
+use kharbranth::{Config, WSManager};
 use log::info;
 use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
@@ -52,14 +52,12 @@ async fn main() -> Result<()> {
 
     manager.new_conn("hyperliquid", config).await;
 
-    let text_hook = HookType::Text(Box::new(|text| {
+    manager.add_text_hook("hyperliquid", |text| {
         info!("Received candle data: {}", text);
         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
             info!("Parsed JSON: {}", parsed);
         };
-    }));
-
-    manager.add_hook("hyperliquid", text_hook).await;
+    }).await;
 
     let _handles = manager.start();
 

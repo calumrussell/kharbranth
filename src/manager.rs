@@ -55,6 +55,54 @@ impl WSManager {
         }
     }
 
+    pub async fn add_text_hook<F>(&mut self, name: &str, handler: F)
+    where
+        F: Fn(String) + Send + Sync + 'static,
+    {
+        let hook = HookType::Text(Box::new(move |utf8_bytes| {
+            handler(utf8_bytes.to_string());
+        }));
+        self.add_hook(name, hook).await;
+    }
+
+    pub async fn add_binary_hook<F>(&mut self, name: &str, handler: F)
+    where
+        F: Fn(Vec<u8>) + Send + Sync + 'static,
+    {
+        let hook = HookType::Binary(Box::new(move |bytes| {
+            handler(bytes.to_vec());
+        }));
+        self.add_hook(name, hook).await;
+    }
+
+    pub async fn add_ping_hook<F>(&mut self, name: &str, handler: F)
+    where
+        F: Fn(Vec<u8>) + Send + Sync + 'static,
+    {
+        let hook = HookType::Ping(Box::new(move |bytes| {
+            handler(bytes.to_vec());
+        }));
+        self.add_hook(name, hook).await;
+    }
+
+    pub async fn add_pong_hook<F>(&mut self, name: &str, handler: F)
+    where
+        F: Fn(Vec<u8>) + Send + Sync + 'static,
+    {
+        let hook = HookType::Pong(Box::new(move |bytes| {
+            handler(bytes.to_vec());
+        }));
+        self.add_hook(name, hook).await;
+    }
+
+    pub async fn add_close_hook<F>(&mut self, name: &str, handler: F)
+    where
+        F: Fn(Option<tokio_tungstenite::tungstenite::protocol::CloseFrame>) + Send + Sync + 'static,
+    {
+        let hook = HookType::Close(Box::new(handler));
+        self.add_hook(name, hook).await;
+    }
+
     pub async fn new_conn(&mut self, name: &str, config: Config) {
         let conn = Connection::new(config, ReadHooks::new());
         self.conn
