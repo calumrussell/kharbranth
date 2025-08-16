@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use tokio_tungstenite::tungstenite::Message;
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -8,7 +7,7 @@ pub struct Config {
     pub ping_message: String,
     pub ping_timeout: u64,
     pub reconnect_timeout: u64,
-    pub write_on_init: Vec<Message>,
+    pub write_on_init: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

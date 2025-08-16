@@ -5,7 +5,6 @@ use kharbranth::{Config, HookType, WSManager};
 use log::info;
 use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
-use tokio_tungstenite::tungstenite::Message;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct HyperliquidSubscribe {
@@ -47,7 +46,7 @@ async fn main() -> Result<()> {
         ping_message: "{\"method\":\"ping\"}".to_string(),
         ping_timeout: 30,
         reconnect_timeout: 5,
-        write_on_init: vec![Message::Text(subscribe_json.into())],
+        write_on_init: vec![subscribe_json],
     };
 
     manager.new_conn("hyperliquid", config).await;

@@ -5,7 +5,7 @@ mod manager;
 mod ping;
 mod types;
 
-pub use config::{BroadcastMessage, Config};
+pub use config::Config;
 pub use hooks::HookType;
 pub use manager::WSManager;
 

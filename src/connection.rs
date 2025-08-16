@@ -240,7 +240,8 @@ impl Connection<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
                 let ping_loop = self.ping_loop().await?;
 
                 sleep(Duration::from_millis(500)).await;
-                for message in self.config.write_on_init.clone() {
+                for message_str in self.config.write_on_init.clone() {
+                    let message = Message::Text(message_str.into());
                     if let Err(e) = self.write(message).await {
                         error!("Failed to send initialization message: {}", e);
                     }
