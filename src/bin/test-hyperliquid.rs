@@ -47,6 +47,7 @@ async fn main() -> Result<()> {
         ping_timeout: 30,
         reconnect_timeout: 5,
         write_on_init: vec![subscribe_json],
+        connection_init_delay_ms: None, // Use default 500ms
     };
 
     manager.new_conn("hyperliquid", config).await;

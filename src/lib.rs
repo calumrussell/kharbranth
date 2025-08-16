@@ -38,6 +38,7 @@ mod test {
             url: "wss://fake".to_string(),
             reconnect_timeout: 10,
             write_on_init,
+            connection_init_delay_ms: None,
         };
 
         let (sink, stream) = ws_stream.split();
@@ -83,6 +84,7 @@ mod test {
                     url: format!("wss://fake{}.com", i),
                     reconnect_timeout: 10,
                     write_on_init: Vec::new(),
+                    connection_init_delay_ms: None,
                 };
                 manager_clone.new_conn(&format!("conn_{}", i), config).await;
             });
@@ -114,6 +116,7 @@ mod test {
                 url: format!("wss://fake{}.com", i),
                 reconnect_timeout: 10,
                 write_on_init: Vec::new(),
+                connection_init_delay_ms: None,
             };
             manager.new_conn(&format!("conn_{}", i), config).await;
         }
@@ -144,6 +147,7 @@ mod test {
             url: "wss://fake".to_string(),
             reconnect_timeout: 10,
             write_on_init: Vec::new(),
+            connection_init_delay_ms: None,
         };
 
         let hooks = ReadHooks::new();
@@ -169,6 +173,7 @@ mod test {
             url: "wss://fake".to_string(),
             reconnect_timeout: 10,
             write_on_init: Vec::new(),
+            connection_init_delay_ms: None,
         };
 
         let hooks = ReadHooks::new();
@@ -194,6 +199,7 @@ mod test {
             url: "wss://fake".to_string(),
             reconnect_timeout: 10,
             write_on_init: Vec::new(),
+            connection_init_delay_ms: None,
         };
 
         let hooks = ReadHooks::new();
@@ -225,6 +231,7 @@ mod test {
                 url: format!("wss://fake{}.com", i),
                 reconnect_timeout: 10,
                 write_on_init: Vec::new(),
+                connection_init_delay_ms: None,
             };
             manager.new_conn(&format!("conn_{}", i), config).await;
         }
@@ -253,6 +260,7 @@ mod test {
                     url: format!("wss://fake{}.com", i),
                     reconnect_timeout: 10,
                     write_on_init: Vec::new(),
+                    connection_init_delay_ms: None,
                 };
                 manager_clone2
                     .new_conn(&format!("conn_{}", i), config)

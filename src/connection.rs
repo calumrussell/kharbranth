@@ -239,7 +239,7 @@ impl Connection<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
                 let read_loop = self.read_loop().await?;
                 let ping_loop = self.ping_loop().await?;
 
-                sleep(Duration::from_millis(500)).await;
+                sleep(Duration::from_millis(self.config.connection_init_delay())).await;
                 for message_str in self.config.write_on_init.clone() {
                     let message = Message::Text(message_str.into());
                     if let Err(e) = self.write(message).await {
