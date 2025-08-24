@@ -132,6 +132,11 @@ where
             .as_ref()
             .ok_or_else(|| anyhow!("Connection read stream not initialized for read loop"))?;
         let read_clone = Arc::clone(read);
+        let write = self
+            .write
+            .as_ref()
+            .ok_or_else(|| anyhow!("Connection write stream not initialized for read loop"))?;
+        let write_clone = Arc::clone(write);
         let ping_tracker_clone = Arc::clone(&self.ping_tracker);
 
         let on_text_clone = Arc::clone(&self.hooks.on_text);
@@ -161,7 +166,11 @@ where
                                 }
                                 Message::Ping(ping) => {
                                     if let Some(on_ping_func) = on_ping_clone.as_ref() {
-                                        on_ping_func(ping);
+                                        on_ping_func(ping.clone());
+                                    }
+                                    let mut write_lock = write_clone.lock().await;
+                                    if let Err(e) = write_lock.send(Message::Pong(ping)).await {
+                                        error!("Failed to send pong: {}", e);
                                     }
                                 }
                                 Message::Pong(pong) => {
