@@ -1,16 +1,11 @@
-use std::{
-    collections::HashMap, sync::Arc, time::{Duration, SystemTime}
-};
+use std::sync::Arc;
 
-use anyhow::{anyhow, Error, Result};
-use dashmap::DashMap;
+use anyhow::{anyhow, Result};
 use futures_util::{
     stream::{SplitSink, SplitStream}, SinkExt, StreamExt
 };
-use log::{debug, error};
-use tokio::{
-    net::TcpStream, sync::{broadcast::Receiver, Mutex, RwLock}, task::JoinHandle, time::sleep
-};
+use log::debug;
+use tokio::net::TcpStream;
 use tokio_tungstenite::{
     WebSocketStream, connect_async,
     tungstenite::{Message, client::IntoClientRequest},
@@ -19,10 +14,44 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     config::Config,
-    hooks::ReadHooks,
-    ping::PingTracker,
-    types::{ConnectionResult, HookType},
 };
+
+#[derive(Debug)]
+pub enum ConnectionError {
+    PingFailed(String),
+    CloseFrameReceived,
+    PongReceiveTimeout,
+    ReadError(String),
+    ConnectionDropped,
+    WriteError(String),
+    ConnectionNotFound(String),
+    ConnectionInitFailed(String),
+}
+
+impl std::fmt::Display for ConnectionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConnectionError::PingFailed(msg) => write!(f, "Ping Failed: {:?}", msg),
+            ConnectionError::CloseFrameReceived => write!(f, "Close Frame Received"),
+            ConnectionError::PongReceiveTimeout => write!(f, "Timed out waiting for Pong"),
+            ConnectionError::ReadError(msg) => {
+                write!(f, "Read error when calling .next(): {:?}", msg)
+            }
+            ConnectionError::ConnectionDropped => write!(f, "Connection dropped"),
+            ConnectionError::WriteError(msg) => {
+                write!(f, "Write error when calling .send(): {:?}", msg)
+            }
+            ConnectionError::ConnectionNotFound(name) => {
+                write!(f, "Connection not found: {:?}", name)
+            }
+            ConnectionError::ConnectionInitFailed(msg) => {
+                write!(f, "Connection initialization failed: {:?}", msg)
+            }
+        }
+    }
+}
+
+impl std::error::Error for ConnectionError {}
 
 #[derive(Clone, Debug)]
 pub enum ConnectionMessage {
@@ -58,7 +87,7 @@ impl ReadActor {
                             self.bytes_recv += msg.len() as u64;
                             let _ = self.send.send(ConnectionMessage::Message(self.name.clone(), msg));
                         },
-                        Some(Err(e)) => break,
+                        Some(Err(_e)) => break,
                         None => break,
                     }
                 },
@@ -128,7 +157,7 @@ impl WriteActor {
 
 #[derive(Clone)]
 pub struct WriteActorHandle {
-    sender: Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>,
+    pub sender: Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>,
 }
 
 impl WriteActorHandle {
@@ -144,8 +173,8 @@ impl WriteActorHandle {
 #[derive(Clone)]
 pub struct Connection {
     name: String,
-    writer: WriteActorHandle,
-    reader: ReadActorHandle,
+    pub writer: WriteActorHandle,
+    pub reader: ReadActorHandle,
     config: Config,
     cancel_token: CancellationToken,
 }

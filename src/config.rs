@@ -2,20 +2,14 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug)]
 pub struct Config {
+    pub name: String,
     pub url: String,
     pub ping_duration: u64,
     pub ping_message: String,
     pub ping_timeout: u64,
     pub reconnect_timeout: u64,
-    pub write_on_init: Vec<String>,
-    pub connection_init_delay_ms: Option<u64>,
 }
 
-impl Config {
-    pub fn connection_init_delay(&self) -> u64 {
-        self.connection_init_delay_ms.unwrap_or(500)
-    }
-}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BroadcastMessage {

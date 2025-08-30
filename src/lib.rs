@@ -1,14 +1,10 @@
 mod config;
 mod connection;
-mod hooks;
 mod manager;
-mod ping;
-mod types;
 
 pub use config::Config;
-pub use hooks::HookType;
-pub use manager::WSManager;
-pub use connection::{Manager, ConnectionMessage};
+pub use manager::Manager;
+pub use connection::ConnectionMessage;
 
 #[cfg(test)]
 mod test {

@@ -1,25 +1,16 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use anyhow::{Error, anyhow};
+use anyhow::Result;
 use dashmap::DashMap;
-use log::{error, info};
-use tokio::{
-    sync::{RwLock, broadcast},
-    task::JoinHandle,
-    time::sleep,
-};
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::{
-    config::{BroadcastMessage, BroadcastMessageType, Config},
-    connection::{Connection, ConnectionError},
-    hooks::ReadHooks,
-    types::{ConnectionResult, HookType},
+    config::Config, connection::{Connection, ConnectionMessage},
 };
 
 #[derive(Clone)]
 pub struct Manager {
-    conn: DashMap<String, ConnectionWrapper>,
+    conn: DashMap<String, Connection>,
     write_sends: DashMap<String, Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>>,
     read_send: Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>,
     read_tracker: DashMap<String, u64>,
@@ -83,7 +74,7 @@ impl Manager {
                 } else {
                     let bytes_recv_last = checker.get(&name).unwrap();
                     if bytes_recv_now == *bytes_recv_last {
-                        self.close_conn(&name);
+                        self.close_conn(&name).await;
                     }
                 }
             }
@@ -94,7 +85,7 @@ impl Manager {
 
     pub async fn new_conn(&mut self, name: &str, config: Config) -> Result<()> {
         let reader_send = Arc::clone(&self.read_send);
-        let wrapper = ConnectionWrapper::new(name, config, reader_send).await?;
+        let wrapper = Connection::new(name, config, reader_send).await?;
 
         let writer_send_arc = Arc::clone(&wrapper.writer.sender);
         self.conn.insert(name.to_string(), wrapper);

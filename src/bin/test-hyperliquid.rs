@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use kharbranth::{Config, WSManager};
+use kharbranth::{Config, Manager};
 use log::info;
 use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
@@ -25,7 +25,7 @@ async fn main() -> Result<()> {
     env_logger::init();
     info!("Starting Hyperliquid WebSocket test");
 
-    let mut manager = WSManager::new();
+    let mut manager = Manager::new();
 
     let subscription = HyperliquidSubscriptionMessage {
         typ: "candle".to_string(),
@@ -41,36 +41,38 @@ async fn main() -> Result<()> {
     let subscribe_json = serde_json::to_string(&subscribe)?;
 
     let config = Config {
+        name: "hyperliquid".to_string(),
         url: "wss://api.hyperliquid.xyz/ws".to_string(),
         ping_duration: 10,
-        ping_message: "{\"method\":\"ping\"}".to_string(),
+        ping_message: r#"{"method":"ping"}"#.to_string(),
         ping_timeout: 30,
         reconnect_timeout: 5,
-        write_on_init: vec![subscribe_json],
-        connection_init_delay_ms: None, // Use default 500ms
     };
 
     manager.new_conn("hyperliquid", config).await;
 
-    manager.add_text_hook("hyperliquid", |text| {
-        info!("Received candle data: {}", text);
-        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
-            info!("Parsed JSON: {}", parsed);
-        };
-    }).await;
+    // TODO: Implement hook system and start/restart methods for new Manager API
+    // manager
+    //     .add_text_hook("hyperliquid", |text| {
+    //         info!("Received candle data: {}", text);
+    //         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
+    //             info!("Parsed JSON: {}", parsed);
+    //         };
+    //     })
+    //     .await;
 
-    let _handles = manager.start();
+    // let _handles = manager.start();
 
-    let manager_clone = manager.clone();
-    tokio::spawn(async move {
-        loop {
-            sleep(Duration::from_secs(20)).await;
-            info!("Sending restart signal to hyperliquid connection");
-            if let Err(e) = manager_clone.restart("hyperliquid") {
-                info!("Failed to send restart signal: {}", e);
-            }
-        }
-    });
+    // let manager_clone = manager.clone();
+    // tokio::spawn(async move {
+    //     loop {
+    //         sleep(Duration::from_secs(20)).await;
+    //         info!("Sending restart signal to hyperliquid connection");
+    //         if let Err(e) = manager_clone.restart("hyperliquid") {
+    //             info!("Failed to send restart signal: {}", e);
+    //         }
+    //     }
+    // });
 
     sleep(Duration::from_secs(2)).await;
 
