@@ -25,7 +25,7 @@ async fn main() -> Result<()> {
     env_logger::init();
     info!("Starting Hyperliquid WebSocket test");
 
-    let mut manager = Manager::new();
+    let manager = Manager::new();
 
     let subscription = HyperliquidSubscriptionMessage {
         typ: "candle".to_string(),

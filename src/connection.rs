@@ -110,7 +110,7 @@ impl ReadActorHandle {
         sender: Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>,
     ) -> Self {
         let mut actor = ReadActor::new(name, reader, Arc::clone(&sender));
-        tokio::spawn(async move { 
+        tokio::spawn(async move {
             actor.run(cancel_token).await;
         });
 
@@ -171,7 +171,7 @@ impl WriteActorHandle {
     pub fn new(name: String, writer: Writer, cancel_token: CancellationToken) -> Self {
         let (sender, receiver) = tokio::sync::broadcast::channel(8);
         let mut actor = WriteActor::new(name, writer, receiver);
-        tokio::spawn(async move { 
+        tokio::spawn(async move {
             actor.run(cancel_token).await;
         });
 

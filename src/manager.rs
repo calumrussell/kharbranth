@@ -16,6 +16,12 @@ pub struct Manager {
     read_tracker: DashMap<String, u64>,
 }
 
+impl Default for Manager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Manager {
     pub fn new() -> Self {
         let (read_send, _read_recv) = tokio::sync::broadcast::channel::<ConnectionMessage>(1_028);
@@ -70,21 +76,18 @@ impl Manager {
                     }
                 }
                 _ = interval.tick() => {
-                    // Collect current state in one pass to avoid deadlock
                     let current_state: HashMap<String, u64> = self.read_tracker
                         .iter()
                         .map(|entry| (entry.key().clone(), *entry.value()))
                         .collect();
 
                     for (conn_name, current_bytes) in &current_state {
-                        if let Some(prev_bytes) = previous_bytes.get(conn_name) {
-                            if current_bytes == prev_bytes {
+                        if let Some(prev_bytes) = previous_bytes.get(conn_name)
+                            && current_bytes == prev_bytes {
                                 self.close_conn(conn_name).await;
                             }
-                        }
                     }
-                    
-                    // Update previous_bytes for next check
+
                     previous_bytes = current_state;
                 }
             }

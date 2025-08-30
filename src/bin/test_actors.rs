@@ -8,7 +8,6 @@ use tokio_tungstenite::tungstenite::Message;
 async fn main() -> Result<()> {
     env_logger::init();
 
-
     // Create manager
     let manager = Arc::new(Manager::new());
 
@@ -32,7 +31,7 @@ async fn main() -> Result<()> {
             match read_channel.recv().await {
                 Ok(msg) => {
                     println!("Received: {:?}", msg);
-                },
+                }
                 Err(_e) => break,
             }
         }
