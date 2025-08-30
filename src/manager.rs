@@ -78,12 +78,15 @@ impl Manager {
             for conn in self.read_tracker.iter() {
                 let name = conn.key().clone();
                 let bytes_recv_now = *conn.value();
-                if !checker.contains_key(&name) {
-                    checker.insert(name, bytes_recv_now);
-                } else {
-                    let bytes_recv_last = checker.get(&name).unwrap();
-                    if bytes_recv_now == *bytes_recv_last {
-                        self.close_conn(&name).await;
+                match checker.entry(name) {
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        entry.insert(bytes_recv_now);
+                    }
+                    std::collections::hash_map::Entry::Occupied(entry) => {
+                        let bytes_recv_last = *entry.get();
+                        if bytes_recv_now == bytes_recv_last {
+                            self.close_conn(entry.key()).await;
+                        }
                     }
                 }
             }

@@ -38,7 +38,7 @@ async fn main() -> Result<()> {
         subscription,
     };
 
-    let subscribe_json = serde_json::to_string(&subscribe)?;
+    let _subscribe_json = serde_json::to_string(&subscribe)?;
 
     let config = Config {
         name: "hyperliquid".to_string(),
@@ -49,7 +49,7 @@ async fn main() -> Result<()> {
         reconnect_timeout: 5,
     };
 
-    manager.new_conn("hyperliquid", config).await;
+    let _ = manager.new_conn("hyperliquid", config).await;
 
     // TODO: Implement hook system and start/restart methods for new Manager API
     // manager
