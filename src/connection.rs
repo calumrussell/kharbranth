@@ -84,7 +84,6 @@ impl ReadActor {
         loop {
             tokio::select! {
                 msg_result = self.reader.next() => {
-                    println!("Read: {:?}", msg_result);
                     match msg_result {
                         Some(Ok(msg)) => {
                             self.bytes_recv += msg.len() as u64;
@@ -111,7 +110,9 @@ impl ReadActorHandle {
         sender: Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>,
     ) -> Self {
         let mut actor = ReadActor::new(name, reader, Arc::clone(&sender));
-        tokio::spawn(async move { actor.run(cancel_token).await });
+        tokio::spawn(async move { 
+            actor.run(cancel_token).await;
+        });
 
         Self
     }
@@ -135,7 +136,6 @@ impl WriteActor {
     }
 
     async fn handle_message(&mut self, msg: ConnectionMessage) {
-        println!("Write: {:?}", msg);
         match msg {
             ConnectionMessage::Message(_name, msg) => {
                 let _ = self.writer.send(msg).await;
@@ -171,7 +171,9 @@ impl WriteActorHandle {
     pub fn new(name: String, writer: Writer, cancel_token: CancellationToken) -> Self {
         let (sender, receiver) = tokio::sync::broadcast::channel(8);
         let mut actor = WriteActor::new(name, writer, receiver);
-        tokio::spawn(async move { actor.run(cancel_token).await });
+        tokio::spawn(async move { 
+            actor.run(cancel_token).await;
+        });
 
         Self {
             sender: Arc::new(sender),

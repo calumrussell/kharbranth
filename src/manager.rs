@@ -9,7 +9,6 @@ use crate::{
     connection::{Connection, ConnectionMessage},
 };
 
-#[derive(Clone)]
 pub struct Manager {
     conn: DashMap<String, Connection>,
     write_sends: DashMap<String, Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>>,
@@ -17,15 +16,9 @@ pub struct Manager {
     read_tracker: DashMap<String, u64>,
 }
 
-impl Default for Manager {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Manager {
     pub fn new() -> Self {
-        let (read_send, _read_recv) = tokio::sync::broadcast::channel::<ConnectionMessage>(8);
+        let (read_send, _read_recv) = tokio::sync::broadcast::channel::<ConnectionMessage>(1_028);
 
         Self {
             conn: DashMap::new(),
@@ -35,23 +28,8 @@ impl Manager {
         }
     }
 
-    pub async fn read(&self) {
-        let mut read_recv = self.read_send.subscribe();
-        while let Ok(msg) = read_recv.recv().await {
-            match msg {
-                ConnectionMessage::Message(name, msg) => {
-                    let bytes_len = msg.len();
-
-                    if let Some(mut bytes) = self.read_tracker.get_mut(&name) {
-                        *bytes += bytes_len as u64;
-                    } else {
-                        self.read_tracker.insert(name.clone(), bytes_len as u64);
-                    }
-
-                    println!("{:?}", msg);
-                }
-            }
-        }
+    pub fn read(&self) -> tokio::sync::broadcast::Receiver<ConnectionMessage> {
+        self.read_send.subscribe()
     }
 
     pub async fn write(&self, name: &str, message: ConnectionMessage) {
@@ -72,30 +50,48 @@ impl Manager {
     }
 
     pub async fn read_timeout_loop(&self) {
-        loop {
-            let mut checker = HashMap::new();
+        let mut read_recv = self.read_send.subscribe();
+        let mut interval = tokio::time::interval(Duration::from_secs(10));
+        let mut previous_bytes = HashMap::new();
 
-            for conn in self.read_tracker.iter() {
-                let name = conn.key().clone();
-                let bytes_recv_now = *conn.value();
-                match checker.entry(name) {
-                    std::collections::hash_map::Entry::Vacant(entry) => {
-                        entry.insert(bytes_recv_now);
-                    }
-                    std::collections::hash_map::Entry::Occupied(entry) => {
-                        let bytes_recv_last = *entry.get();
-                        if bytes_recv_now == bytes_recv_last {
-                            self.close_conn(entry.key()).await;
+        loop {
+            tokio::select! {
+                msg_result = read_recv.recv() => {
+                    if let Ok(msg) = msg_result {
+                        match msg {
+                            ConnectionMessage::Message(conn_name, msg_content) => {
+                                let bytes_to_add = msg_content.len() as u64;
+                                self.read_tracker
+                                    .entry(conn_name)
+                                    .and_modify(|bytes| *bytes += bytes_to_add)
+                                    .or_insert(bytes_to_add);
+                            }
                         }
                     }
                 }
-            }
+                _ = interval.tick() => {
+                    // Collect current state in one pass to avoid deadlock
+                    let current_state: HashMap<String, u64> = self.read_tracker
+                        .iter()
+                        .map(|entry| (entry.key().clone(), *entry.value()))
+                        .collect();
 
-            tokio::time::sleep(Duration::from_secs(10)).await;
+                    for (conn_name, current_bytes) in &current_state {
+                        if let Some(prev_bytes) = previous_bytes.get(conn_name) {
+                            if current_bytes == prev_bytes {
+                                self.close_conn(conn_name).await;
+                            }
+                        }
+                    }
+                    
+                    // Update previous_bytes for next check
+                    previous_bytes = current_state;
+                }
+            }
         }
     }
 
-    pub async fn new_conn(&mut self, name: &str, config: Config) -> Result<()> {
+    pub async fn new_conn(&self, name: &str, config: Config) -> Result<()> {
         let reader_send = Arc::clone(&self.read_send);
         let wrapper = Connection::new(name, config, reader_send).await?;
 

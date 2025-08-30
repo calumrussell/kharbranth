@@ -1,6 +1,6 @@
 use anyhow::Result;
 use kharbranth::{Config, ConnectionMessage, Manager};
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 use tokio::time::sleep;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -8,10 +8,9 @@ use tokio_tungstenite::tungstenite::Message;
 async fn main() -> Result<()> {
     env_logger::init();
 
-    println!("Testing new actor handle implementation...");
 
     // Create manager
-    let mut manager = Manager::new();
+    let manager = Arc::new(Manager::new());
 
     // Test with a public WebSocket echo server
     let config = Config {
@@ -24,19 +23,24 @@ async fn main() -> Result<()> {
     };
 
     // Create connection
-    println!("Creating connection...");
     manager.new_conn("test", config).await?;
 
     // Start read loop in background
-    let manager_clone = manager.clone();
+    let mut read_channel = manager.read();
     tokio::spawn(async move {
-        manager_clone.read().await;
+        loop {
+            match read_channel.recv().await {
+                Ok(msg) => {
+                    println!("Received: {:?}", msg);
+                },
+                Err(_e) => break,
+            }
+        }
     });
 
-    // Start timeout loop in background
-    let manager_clone2 = manager.clone();
+    let cloned_manager = Arc::clone(&manager);
     tokio::spawn(async move {
-        manager_clone2.read_timeout_loop().await;
+        cloned_manager.read_timeout_loop().await;
     });
 
     sleep(Duration::from_secs(2)).await;
@@ -51,13 +55,9 @@ async fn main() -> Result<()> {
     manager.write("test", test_msg).await;
 
     // Let it run for a bit to see messages
-    println!("Running for 30 seconds to observe behavior...");
     sleep(Duration::from_secs(30)).await;
 
     // Close connection
-    println!("Closing connection...");
     manager.close_conn("test").await;
-
-    println!("Test completed!");
     Ok(())
 }
