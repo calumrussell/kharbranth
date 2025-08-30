@@ -1,10 +1,11 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use anyhow::Result;
-use kharbranth::{Config, Manager};
+use kharbranth::{Config, Manager, ConnectionMessage};
 use log::info;
 use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
+use tokio_tungstenite::tungstenite::Message;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct HyperliquidSubscribe {
@@ -25,7 +26,7 @@ async fn main() -> Result<()> {
     env_logger::init();
     info!("Starting Hyperliquid WebSocket test");
 
-    let manager = Manager::new();
+    let manager = Arc::new(Manager::new());
 
     let subscription = HyperliquidSubscriptionMessage {
         typ: "candle".to_string(),
@@ -38,7 +39,7 @@ async fn main() -> Result<()> {
         subscription,
     };
 
-    let _subscribe_json = serde_json::to_string(&subscribe)?;
+    let subscribe_json = serde_json::to_string(&subscribe)?;
 
     let config = Config {
         name: "hyperliquid".to_string(),
@@ -49,34 +50,44 @@ async fn main() -> Result<()> {
         reconnect_timeout: 5,
     };
 
-    let _ = manager.new_conn("hyperliquid", config).await;
+    manager.new_conn("hyperliquid", config).await?;
 
-    // TODO: Implement hook system and start/restart methods for new Manager API
-    // manager
-    //     .add_text_hook("hyperliquid", |text| {
-    //         info!("Received candle data: {}", text);
-    //         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
-    //             info!("Parsed JSON: {}", parsed);
-    //         };
-    //     })
-    //     .await;
-
-    // let _handles = manager.start();
-
-    // let manager_clone = manager.clone();
-    // tokio::spawn(async move {
-    //     loop {
-    //         sleep(Duration::from_secs(20)).await;
-    //         info!("Sending restart signal to hyperliquid connection");
-    //         if let Err(e) = manager_clone.restart("hyperliquid") {
-    //             info!("Failed to send restart signal: {}", e);
-    //         }
-    //     }
-    // });
+    let mut read_channel = manager.read();
+    tokio::spawn(async move {
+        while let Ok(msg) = read_channel.recv().await {
+            match msg {
+                ConnectionMessage::Message(conn_name, message) => {
+                    info!("Received from {}: {:?}", conn_name, message);
+                    if let Message::Text(text) = message {
+                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
+                            info!("Parsed JSON: {}", parsed);
+                        }
+                    }
+                },
+                _ => (),
+            }
+        }
+    });
 
     sleep(Duration::from_secs(2)).await;
 
-    loop {
-        sleep(Duration::from_secs(3600)).await;
-    }
+    // Send subscription message
+    let subscription_msg = ConnectionMessage::Message(
+        "hyperliquid".to_string(),
+        Message::Text(subscribe_json.into())
+    );
+    manager.write("hyperliquid", subscription_msg.clone()).await;
+
+    sleep(Duration::from_secs(5)).await;
+
+    info!("Trigger reconnect");
+    let _ = manager.reconnect("hyperliquid").await;
+    manager.write("hyperliquid", subscription_msg).await;
+
+    sleep(Duration::from_secs(20)).await;
+
+    info!("Closing connection...");
+    manager.close_conn("hyperliquid").await;
+    
+    Ok(())
 }

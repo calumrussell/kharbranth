@@ -55,6 +55,7 @@ impl std::error::Error for ConnectionError {}
 #[derive(Clone, Debug)]
 pub enum ConnectionMessage {
     Message(String, Message),
+    ReadError(String),
 }
 
 type Reader = SplitStream<WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>>;
@@ -89,8 +90,14 @@ impl ReadActor {
                             self.bytes_recv += msg.len() as u64;
                             let _ = self.send.send(ConnectionMessage::Message(self.name.clone(), msg));
                         },
-                        Some(Err(_e)) => break,
-                        None => break,
+                        Some(Err(_e)) => {
+                            let _ = self.send.send(ConnectionMessage::ReadError(self.name.clone()));
+                            break;
+                        },
+                        None => {
+                            let _ = self.send.send(ConnectionMessage::ReadError(self.name.clone()));
+                            break;
+                        }
                     }
                 },
                 _ = cancel_token.cancelled() => break,
@@ -139,7 +146,9 @@ impl WriteActor {
         match msg {
             ConnectionMessage::Message(_name, msg) => {
                 let _ = self.writer.send(msg).await;
-            }
+            },
+            _ => (),
+        
         }
     }
 
@@ -186,8 +195,8 @@ pub struct Connection {
     name: String,
     pub writer: WriteActorHandle,
     pub reader: ReadActorHandle,
-    config: Config,
-    cancel_token: CancellationToken,
+    pub config: Config,
+    pub cancel_token: CancellationToken,
 }
 
 impl Connection {

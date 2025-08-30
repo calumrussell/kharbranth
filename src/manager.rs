@@ -45,14 +45,20 @@ impl Manager {
     }
 
     pub async fn close_conn(&self, name: &str) {
-        let writer = self.write_sends.get(name).unwrap();
-        let _ = writer.send(ConnectionMessage::Message(
-            name.to_string(),
-            Message::Close(None),
-        ));
+        if let Some(writer) = self.write_sends.get(name) {
+            let _ = writer.send(ConnectionMessage::Message(
+                name.to_string(),
+                Message::Close(None),
+            ));
+        }
+
+        if let Some(conn) = self.conn.get(name) {
+            conn.cancel_token.cancel();
+        }
 
         self.write_sends.remove(&name.to_string());
         self.conn.remove(&name.to_string());
+        self.read_tracker.remove(&name.to_string());
     }
 
     pub async fn read_timeout_loop(&self) {
@@ -71,7 +77,8 @@ impl Manager {
                                     .entry(conn_name)
                                     .and_modify(|bytes| *bytes += bytes_to_add)
                                     .or_insert(bytes_to_add);
-                            }
+                            },
+                            _ => (),
                         }
                     }
                 }
@@ -102,5 +109,34 @@ impl Manager {
         self.conn.insert(name.to_string(), wrapper);
         self.write_sends.insert(name.to_string(), writer_send_arc);
         Ok(())
+    }
+
+    pub async fn reconnect(&self, name: &str) -> Result<()> {
+        let config = if let Some(conn) = self.conn.get(name) {
+            conn.config.clone()
+        } else {
+            return Err(anyhow::anyhow!("Connection '{}' not found for reconnect", name));
+        };
+
+        self.close_conn(name).await;
+
+        tokio::time::sleep(Duration::from_secs(config.reconnect_timeout)).await;
+
+        self.new_conn(name, config).await
+    }
+
+    pub async fn error_handling_loop(&self) {
+        let mut read_recv = self.read_send.subscribe();
+
+        loop {
+            if let Ok(msg) = read_recv.recv().await {
+                match msg {
+                    ConnectionMessage::ReadError(conn_name) => {
+                        let _ = self.reconnect(&conn_name).await;
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
 }
