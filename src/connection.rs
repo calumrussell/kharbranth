@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use futures_util::{
-    stream::{SplitSink, SplitStream}, SinkExt, StreamExt
+    SinkExt, StreamExt,
+    stream::{SplitSink, SplitStream},
 };
 use log::debug;
 use tokio::net::TcpStream;
@@ -12,9 +13,7 @@ use tokio_tungstenite::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    config::Config,
-};
+use crate::config::Config;
 
 #[derive(Debug)]
 pub enum ConnectionError {
@@ -68,7 +67,11 @@ pub struct ReadActor {
 }
 
 impl ReadActor {
-    fn new(name: String, reader: Reader, send: Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>) -> Self {
+    fn new(
+        name: String,
+        reader: Reader,
+        send: Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>,
+    ) -> Self {
         Self {
             name,
             reader,
@@ -101,14 +104,18 @@ impl ReadActor {
 pub struct ReadActorHandle;
 
 impl ReadActorHandle {
-    pub fn new(name: String, reader: Reader, cancel_token: CancellationToken, sender: Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>) -> Self {
+    pub fn new(
+        name: String,
+        reader: Reader,
+        cancel_token: CancellationToken,
+        sender: Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>,
+    ) -> Self {
         let mut actor = ReadActor::new(name, reader, Arc::clone(&sender));
         tokio::spawn(async move { actor.run(cancel_token).await });
 
         Self
     }
 }
-
 
 type Writer = SplitSink<WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>, Message>;
 
@@ -119,12 +126,12 @@ pub struct WriteActor {
 }
 
 impl WriteActor {
-    fn new(name: String, writer: Writer, read: tokio::sync::broadcast::Receiver<ConnectionMessage>) -> Self {
-        Self {
-            name,
-            writer,
-            read,
-        }
+    fn new(
+        name: String,
+        writer: Writer,
+        read: tokio::sync::broadcast::Receiver<ConnectionMessage>,
+    ) -> Self {
+        Self { name, writer, read }
     }
 
     async fn handle_message(&mut self, msg: ConnectionMessage) {
@@ -166,7 +173,9 @@ impl WriteActorHandle {
         let mut actor = WriteActor::new(name, writer, receiver);
         tokio::spawn(async move { actor.run(cancel_token).await });
 
-        Self { sender: Arc::new(sender) }
+        Self {
+            sender: Arc::new(sender),
+        }
     }
 }
 
@@ -180,7 +189,11 @@ pub struct Connection {
 }
 
 impl Connection {
-    pub async fn new(name: &str, config: Config, reader_send: Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>) -> Result<Self> {
+    pub async fn new(
+        name: &str,
+        config: Config,
+        reader_send: Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>,
+    ) -> Result<Self> {
         let request = config
             .url
             .clone()
@@ -193,8 +206,14 @@ impl Connection {
                 let (write_stream, read_stream) = conn.split();
 
                 let cancel_token = CancellationToken::new();
-                let writer = WriteActorHandle::new(name.to_string(), write_stream, cancel_token.clone());
-                let reader = ReadActorHandle::new(name.to_string(), read_stream, cancel_token.clone(), Arc::clone(&reader_send));
+                let writer =
+                    WriteActorHandle::new(name.to_string(), write_stream, cancel_token.clone());
+                let reader = ReadActorHandle::new(
+                    name.to_string(),
+                    read_stream,
+                    cancel_token.clone(),
+                    Arc::clone(&reader_send),
+                );
 
                 Ok(Self {
                     name: name.to_string(),
@@ -210,6 +229,3 @@ impl Connection {
         }
     }
 }
-
-
-

@@ -5,7 +5,8 @@ use dashmap::DashMap;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::{
-    config::Config, connection::{Connection, ConnectionMessage},
+    config::Config,
+    connection::{Connection, ConnectionMessage},
 };
 
 #[derive(Clone)]
@@ -14,7 +15,12 @@ pub struct Manager {
     write_sends: DashMap<String, Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>>,
     read_send: Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>,
     read_tracker: DashMap<String, u64>,
+}
 
+impl Default for Manager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Manager {
@@ -56,7 +62,10 @@ impl Manager {
 
     pub async fn close_conn(&self, name: &str) {
         let writer = self.write_sends.get(name).unwrap();
-        let _ = writer.send(ConnectionMessage::Message(name.to_string(), Message::Close(None)));
+        let _ = writer.send(ConnectionMessage::Message(
+            name.to_string(),
+            Message::Close(None),
+        ));
 
         self.write_sends.remove(&name.to_string());
         self.conn.remove(&name.to_string());
@@ -68,7 +77,7 @@ impl Manager {
 
             for conn in self.read_tracker.iter() {
                 let name = conn.key().clone();
-                let bytes_recv_now = conn.value().clone();
+                let bytes_recv_now = *conn.value();
                 if !checker.contains_key(&name) {
                     checker.insert(name, bytes_recv_now);
                 } else {

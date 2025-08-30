@@ -10,7 +10,6 @@ pub struct Config {
     pub reconnect_timeout: u64,
 }
 
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BroadcastMessage {
     pub target: String,

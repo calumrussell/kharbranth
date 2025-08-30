@@ -3,8 +3,8 @@ mod connection;
 mod manager;
 
 pub use config::Config;
-pub use manager::Manager;
 pub use connection::ConnectionMessage;
+pub use manager::Manager;
 
 #[cfg(test)]
 mod test {
