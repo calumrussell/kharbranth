@@ -8,6 +8,7 @@ mod types;
 pub use config::Config;
 pub use hooks::HookType;
 pub use manager::WSManager;
+pub use connection::{Manager, ConnectionMessage};
 
 #[cfg(test)]
 mod test {

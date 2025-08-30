@@ -17,230 +17,88 @@ use crate::{
     types::{ConnectionResult, HookType},
 };
 
-type ConnectionType = Connection<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+#[derive(Clone)]
+pub struct Manager {
+    conn: DashMap<String, ConnectionWrapper>,
+    write_sends: DashMap<String, Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>>,
+    read_send: Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>,
+    read_tracker: DashMap<String, u64>,
 
-pub struct WSManager {
-    pub conn: Arc<DashMap<String, Arc<RwLock<ConnectionType>>>>,
-    restart_tx: broadcast::Sender<BroadcastMessage>,
 }
 
-impl Default for WSManager {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Clone for WSManager {
-    fn clone(&self) -> Self {
-        Self {
-            conn: Arc::clone(&self.conn),
-            restart_tx: self.restart_tx.clone(),
-        }
-    }
-}
-
-impl WSManager {
+impl Manager {
     pub fn new() -> Self {
-        let (restart_tx, _) = broadcast::channel(16);
+        let (read_send, _read_recv) = tokio::sync::broadcast::channel::<ConnectionMessage>(8);
+
         Self {
-            conn: Arc::new(DashMap::new()),
-            restart_tx,
+            conn: DashMap::new(),
+            write_sends: DashMap::new(),
+            read_send: Arc::new(read_send),
+            read_tracker: DashMap::new(),
         }
     }
 
-    pub async fn add_hook(&mut self, name: &str, hook: HookType) {
-        if let Some(conn) = self.conn.get(name) {
-            let mut conn_lock = conn.write().await;
-            conn_lock.add_hook(hook);
-        }
-    }
+    pub async fn read(&self) {
+        let mut read_recv = self.read_send.subscribe();
+        while let Ok(msg) = read_recv.recv().await {
+            match msg {
+                ConnectionMessage::Message(name, msg) => {
+                    let bytes_len = msg.len();
 
-    pub async fn add_text_hook<F>(&mut self, name: &str, handler: F)
-    where
-        F: Fn(String) + Send + Sync + 'static,
-    {
-        let hook = HookType::Text(Box::new(move |utf8_bytes| {
-            handler(utf8_bytes.to_string());
-        }));
-        self.add_hook(name, hook).await;
-    }
+                    if let Some(mut bytes) = self.read_tracker.get_mut(&name) {
+                        *bytes += bytes_len as u64;
+                    } else {
+                        self.read_tracker.insert(name.clone(), bytes_len as u64);
+                    }
 
-    pub async fn add_binary_hook<F>(&mut self, name: &str, handler: F)
-    where
-        F: Fn(Vec<u8>) + Send + Sync + 'static,
-    {
-        let hook = HookType::Binary(Box::new(move |bytes| {
-            handler(bytes.to_vec());
-        }));
-        self.add_hook(name, hook).await;
-    }
-
-    pub async fn add_ping_hook<F>(&mut self, name: &str, handler: F)
-    where
-        F: Fn(Vec<u8>) + Send + Sync + 'static,
-    {
-        let hook = HookType::Ping(Box::new(move |bytes| {
-            handler(bytes.to_vec());
-        }));
-        self.add_hook(name, hook).await;
-    }
-
-    pub async fn add_pong_hook<F>(&mut self, name: &str, handler: F)
-    where
-        F: Fn(Vec<u8>) + Send + Sync + 'static,
-    {
-        let hook = HookType::Pong(Box::new(move |bytes| {
-            handler(bytes.to_vec());
-        }));
-        self.add_hook(name, hook).await;
-    }
-
-    pub async fn add_close_hook<F>(&mut self, name: &str, handler: F)
-    where
-        F: Fn(Option<tokio_tungstenite::tungstenite::protocol::CloseFrame>) + Send + Sync + 'static,
-    {
-        let hook = HookType::Close(Box::new(handler));
-        self.add_hook(name, hook).await;
-    }
-
-    pub async fn new_conn(&mut self, name: &str, config: Config) {
-        let conn = Connection::new(config, ReadHooks::new());
-        self.conn
-            .insert(name.to_string(), Arc::new(RwLock::new(conn)));
-    }
-
-    async fn wait_for_reconnect(conn: Arc<RwLock<ConnectionType>>, name: String) {
-        let locked_conn = conn.read().await;
-        let reconnect_timeout = locked_conn.config.reconnect_timeout;
-        info!(
-            "{}: Waiting for {} seconds before reconnecting",
-            name, reconnect_timeout
-        );
-        drop(locked_conn);
-        sleep(Duration::from_secs(reconnect_timeout)).await;
-    }
-
-    async fn attempt_connection(
-        conn: Arc<RwLock<ConnectionType>>,
-        name: String,
-    ) -> Result<(JoinHandle<ConnectionResult>, JoinHandle<ConnectionResult>), Error> {
-        let mut locked_conn = conn.write().await;
-        info!(
-            "{}: Attempting connection to {}",
-            name, locked_conn.config.url
-        );
-        locked_conn.start_loop().await
-    }
-
-    async fn handle_connection_success(
-        read_handle: JoinHandle<ConnectionResult>,
-        ping_handle: JoinHandle<ConnectionResult>,
-        tx: broadcast::Sender<BroadcastMessage>,
-        name: String,
-    ) {
-        info!("{}: Connected", name);
-
-        let rx_clone = tx.subscribe();
-        let restart_handler = Self::create_restart_handler(rx_clone, name.clone());
-        let read_abort = read_handle.abort_handle();
-        let ping_abort = ping_handle.abort_handle();
-
-        tokio::select! {
-            _ = restart_handler => {
-                read_abort.abort();
-                ping_abort.abort();
-            },
-            maybe_read_result = read_handle => {
-                if let Ok(Err(e)) = maybe_read_result {
-                    error!("Read loop error: {:?}", e);
+                    println!("{:?}", msg);
                 }
-                ping_abort.abort();
-            },
-            maybe_ping_result = ping_handle => {
-                if let Ok(Err(e)) = maybe_ping_result {
-                    error!("Ping loop error: {:?}", e);
-                }
-                read_abort.abort();
             }
         }
     }
 
-    async fn run_connection_manager(
-        conn: Arc<RwLock<ConnectionType>>,
-        name: String,
-        tx: broadcast::Sender<BroadcastMessage>,
-    ) {
+    pub async fn write(&self, name: &str, message: ConnectionMessage) {
+        if let Some(sender) = self.write_sends.get(name) {
+            let _ = sender.send(message);
+        }
+    }
+
+    pub async fn close_conn(&self, name: &str) {
+        let writer = self.write_sends.get(name).unwrap();
+        let _ = writer.send(ConnectionMessage::Message(name.to_string(), Message::Close(None)));
+
+        self.write_sends.remove(&name.to_string());
+        self.conn.remove(&name.to_string());
+    }
+
+    pub async fn read_timeout_loop(&self) {
         loop {
-            match Self::attempt_connection(conn.clone(), name.clone()).await {
-                Ok((read_handle, ping_handle)) => {
-                    Self::handle_connection_success(
-                        read_handle,
-                        ping_handle,
-                        tx.clone(),
-                        name.clone(),
-                    )
-                    .await;
-                }
-                Err(e) => {
-                    error!("{}: Connection attempt failed with: {:?}", name, e);
-                }
-            }
-            Self::wait_for_reconnect(conn.clone(), name.clone()).await;
-        }
-    }
+            let mut checker = HashMap::new();
 
-    async fn create_restart_handler(mut rx: broadcast::Receiver<BroadcastMessage>, name: String) {
-        while let Ok(msg) = rx.recv().await {
-            if msg.target == name {
-                if let Ok(msg_type) = msg.action.try_into() {
-                    match msg_type {
-                        BroadcastMessageType::Restart => {
-                            error!("{}: Received abort message", name);
-                            return;
-                        }
+            for conn in self.read_tracker.iter() {
+                let name = conn.key().clone();
+                let bytes_recv_now = conn.value().clone();
+                if !checker.contains_key(&name) {
+                    checker.insert(name, bytes_recv_now);
+                } else {
+                    let bytes_recv_last = checker.get(&name).unwrap();
+                    if bytes_recv_now == *bytes_recv_last {
+                        self.close_conn(&name);
                     }
                 }
             }
+
+            tokio::time::sleep(Duration::from_secs(10)).await;
         }
     }
 
-    pub fn start(&self) -> HashMap<String, JoinHandle<()>> {
-        let mut res = HashMap::with_capacity(self.conn.len());
+    pub async fn new_conn(&mut self, name: &str, config: Config) -> Result<()> {
+        let reader_send = Arc::clone(&self.read_send);
+        let wrapper = ConnectionWrapper::new(name, config, reader_send).await?;
 
-        for entry in &*self.conn {
-            let name = entry.key().clone();
-            let conn = Arc::clone(entry.value());
-            let tx = self.restart_tx.clone();
-
-            let name_for_task = name.clone();
-            let manager_handle = tokio::spawn(async move {
-                Self::run_connection_manager(conn, name_for_task, tx).await;
-            });
-
-            res.insert(name, manager_handle);
-        }
-        res
-    }
-
-    pub fn restart(&self, name: &str) -> Result<(), Error> {
-        let msg = BroadcastMessage {
-            target: name.to_string(),
-            action: 0, // BroadcastMessageType::Restart
-        };
-        self.restart_tx.send(msg).map_err(|e| anyhow!("Failed to send restart signal: {}", e))?;
+        let writer_send_arc = Arc::clone(&wrapper.writer.sender);
+        self.conn.insert(name.to_string(), wrapper);
+        self.write_sends.insert(name.to_string(), writer_send_arc);
         Ok(())
-    }
-
-    pub async fn write(&self, name: &str, msg: Message) -> ConnectionResult {
-        if let Some(conn) = self.conn.get(name) {
-            let msg_debug = format!("{:?}", msg);
-            let mut locked_conn = conn.write().await;
-            return locked_conn.write(msg).await.map_err(|e| {
-                anyhow!("Failed to write message to connection '{}': {} (message: {})", name, e, msg_debug)
-            });
-        }
-        Err(anyhow!(ConnectionError::ConnectionNotFound(
-            format!("Connection '{}' not found when attempting to write message: {:?}", name, msg)
-        )))
     }
 }
