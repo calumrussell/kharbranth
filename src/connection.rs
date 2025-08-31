@@ -1,6 +1,7 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use anyhow::{Result, anyhow};
+use chrono::Local;
 use futures_util::{
     SinkExt, StreamExt,
     stream::{SplitSink, SplitStream},
@@ -111,6 +112,89 @@ impl ReadActor {
 #[derive(Clone)]
 pub struct ReadActorHandle;
 
+pub struct PingActor {
+    name: String,
+    config: Config,
+    writer_send: Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>,
+    global_recv: tokio::sync::broadcast::Receiver<ConnectionMessage>,
+    last_pong_time: Option<i64>,
+}
+
+impl PingActor {
+    fn new(
+        name: String,
+        config: Config,
+        writer_send: Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>,
+        global_recv: tokio::sync::broadcast::Receiver<ConnectionMessage>,
+    ) -> Self {
+        Self {
+            name,
+            config,
+            writer_send,
+            global_recv,
+            last_pong_time: None,
+        }
+    }
+
+    async fn run(&mut self, cancel_token: CancellationToken) {
+        let mut ping_duration = tokio::time::interval(Duration::from_secs(self.config.ping_duration));
+        let mut ping_timeout = tokio::time::interval(Duration::from_secs(self.config.ping_timeout));
+        let ping_msg_bytes: tokio_tungstenite::tungstenite::Bytes = self.config.ping_message.clone().into();
+
+        loop {
+            tokio::select! {
+                _ = ping_duration.tick() => {
+                    let _ = self.writer_send.send(ConnectionMessage::Message(
+                        self.name.clone(), 
+                        Message::Ping(ping_msg_bytes.clone())
+                    ));
+                },
+                _ = ping_timeout.tick() => {
+                    let now = Local::now().timestamp();
+                    if let Some(last_pong) = self.last_pong_time {
+                        if now - last_pong > self.config.ping_timeout as i64 {
+                            let _ = self.writer_send.send(ConnectionMessage::PongReceiveTimeoutError(self.name.clone()));
+                        }
+                    }
+                },
+                _ = cancel_token.cancelled() => break,
+                msg_result = self.global_recv.recv() => {
+                    if let Ok(msg) = msg_result {
+                        if let ConnectionMessage::Message(conn_name, conn_msg) = msg {
+                            if conn_name == self.name {
+                                if let Message::Pong(_val) = conn_msg {
+                                    self.last_pong_time = Some(Local::now().timestamp());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct PingActorHandle;
+
+impl PingActorHandle {
+    pub fn new(
+        name: String,
+        config: Config,
+        writer_send: Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>,
+        global_send: Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>,
+        cancel_token: CancellationToken,
+    ) -> Self {
+        let global_recv = global_send.subscribe();
+        let mut actor = PingActor::new(name, config, writer_send, global_recv);
+        tokio::spawn(async move {
+            actor.run(cancel_token).await;
+        });
+
+        Self
+    }
+}
+
 impl ReadActorHandle {
     pub fn new(
         name: String,
@@ -212,6 +296,7 @@ pub struct Connection {
     name: String,
     pub writer: WriteActorHandle,
     pub reader: ReadActorHandle,
+    pub ping: PingActorHandle,
     pub config: Config,
     pub cancel_token: CancellationToken,
 }
@@ -246,11 +331,19 @@ impl Connection {
                     cancel_token.clone(),
                     Arc::clone(&global_send),
                 );
+                let ping = PingActorHandle::new(
+                    name.to_string(),
+                    config.clone(),
+                    Arc::clone(&writer.sender),
+                    Arc::clone(&global_send),
+                    cancel_token.clone(),
+                );
 
                 Ok(Self {
                     name: name.to_string(),
                     writer,
                     reader,
+                    ping,
                     config,
                     cancel_token,
                 })
