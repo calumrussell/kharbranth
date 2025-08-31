@@ -221,6 +221,7 @@ impl Connection {
         name: &str,
         config: Config,
         global_send: Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>,
+        cancel_token: CancellationToken,
     ) -> Result<Self> {
         let request = config
             .url
@@ -233,7 +234,6 @@ impl Connection {
                 debug!("Handshake response: {:?}", response);
                 let (write_stream, read_stream) = conn.split();
 
-                let cancel_token = CancellationToken::new();
                 let writer = WriteActorHandle::new(
                     name.to_string(),
                     write_stream,

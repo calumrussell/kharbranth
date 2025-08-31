@@ -17,6 +17,7 @@ pub struct Manager {
     global_send: Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>,
     read_tracker: DashMap<String, u64>,
     pong_tracker: DashMap<String, i64>,
+    cancel_tokens: DashMap<String, CancellationToken>,
 }
 
 impl Default for Manager {
@@ -36,6 +37,7 @@ impl Manager {
             global_send: Arc::new(global_send),
             read_tracker: DashMap::new(),
             pong_tracker: DashMap::new(),
+            cancel_tokens: DashMap::new(),
         }
     }
 
@@ -57,13 +59,14 @@ impl Manager {
             ));
         }
 
-        if let Some(conn) = self.conn.get(name) {
-            conn.cancel_token.cancel();
+        if let Some(cancel_token) = self.cancel_tokens.get(name) {
+            cancel_token.cancel();
         }
 
         self.write_sends.remove(&name.to_string());
         self.conn.remove(&name.to_string());
         self.read_tracker.remove(&name.to_string());
+        self.cancel_tokens.remove(&name.to_string());
     }
 
     pub async fn read_timeout_loop(&self) {
@@ -150,12 +153,13 @@ impl Manager {
 
     pub async fn new_conn(&self, name: &str, config: Config) -> Result<()> {
         let global_send = Arc::clone(&self.global_send);
-        let wrapper = Connection::new(name, config.clone(), global_send).await?;
+        let cancel_token = CancellationToken::new();
+        let wrapper = Connection::new(name, config.clone(), global_send, cancel_token.clone()).await?;
 
         let writer_send_arc = Arc::clone(&wrapper.writer.sender);
         self.conn.insert(name.to_string(), wrapper);
         self.write_sends.insert(name.to_string(), writer_send_arc);
-        let cancel_token = CancellationToken::new();
+        self.cancel_tokens.insert(name.to_string(), cancel_token.clone());
         tokio::spawn(self.ping_loop(name, config, cancel_token));
         Ok(())
     }
