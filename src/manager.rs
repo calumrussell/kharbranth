@@ -1,8 +1,10 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use anyhow::Result;
+use chrono::Local;
 use dashmap::DashMap;
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::{Message, Utf8Bytes};
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     config::Config,
@@ -14,6 +16,7 @@ pub struct Manager {
     write_sends: DashMap<String, Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>>,
     global_send: Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>,
     read_tracker: DashMap<String, u64>,
+    pong_tracker: DashMap<String, i64>,
 }
 
 impl Default for Manager {
@@ -31,6 +34,7 @@ impl Manager {
             write_sends: DashMap::new(),
             global_send: Arc::new(global_send),
             read_tracker: DashMap::new(),
+            pong_tracker: DashMap::new(),
         }
     }
 
@@ -101,6 +105,37 @@ impl Manager {
         }
     }
 
+    pub async fn ping_loop(&self, name: &str, config: Config, cancel_token: CancellationToken) {
+        let mut ping_duration = tokio::time::interval(Duration::from_secs(config.ping_duration));
+        let mut ping_timeout = tokio::time::interval(Duration::from_secs(config.ping_timeout));
+        let ping_msg_bytes: tokio_tungstenite::tungstenite::Bytes = config.ping_message.clone().into();
+        let mut global_recv = self.global_send.subscribe();
+        loop {
+            tokio::select! {
+                _ = ping_duration.tick() => {
+                    if let Some(writer) = self.write_sends.get(name) {
+                        let _ = writer.send(ConnectionMessage::Message(name.to_string(), Message::Ping(ping_msg_bytes.clone())));
+                    }
+                },
+                _ = cancel_token.cancelled() => break,
+                msg_result = global_recv.recv() => {
+                    if let Ok(msg) = msg_result {
+                        if let ConnectionMessage::Message(name, conn_msg) = msg {
+                            if let Message::Pong(val) = conn_msg {
+                                let now = Local::now().timestamp();
+                                if let Some(mut last_pong) = self.pong_tracker.get_mut(&name) {
+                                    *last_pong = now;
+                                } else {
+                                    self.pong_tracker.insert(name, now);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     pub async fn new_conn(&self, name: &str, config: Config) -> Result<()> {
         let global_send = Arc::clone(&self.global_send);
         let wrapper = Connection::new(name, config, global_send).await?;
@@ -123,6 +158,28 @@ impl Manager {
         tokio::time::sleep(Duration::from_secs(config.reconnect_timeout)).await;
 
         self.new_conn(name, config).await
+    }
+
+    pub async fn pong_loop(&self) {
+        let mut global_recv = self.global_send.subscribe();
+
+        loop {
+            if let Ok(msg) = global_recv.recv().await {
+                match msg {
+                    ConnectionMessage::Message(name, msg) => {
+                        match msg {
+                            Message::Ping(val) => {
+                                if let Some(conn_writer) = self.write_sends.get(&name) {
+                                    let _ = conn_writer.send(ConnectionMessage::Message(name, Message::Pong(val)));
+                                }
+                            },
+                            _ => {},
+                        }
+                    },
+                    _ => {},
+                }
+            }
+        }
     }
 
     pub async fn error_handling_loop(&self) {
