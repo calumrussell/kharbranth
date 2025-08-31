@@ -56,6 +56,7 @@ impl std::error::Error for ConnectionError {}
 pub enum ConnectionMessage {
     Message(String, Message),
     ReadError(String),
+    WriteError(String),
 }
 
 type Reader = SplitStream<WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>>;
@@ -131,6 +132,7 @@ pub struct WriteActor {
     name: String,
     writer: Writer,
     read: tokio::sync::broadcast::Receiver<ConnectionMessage>,
+    global_send: Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>,
 }
 
 impl WriteActor {
@@ -138,17 +140,19 @@ impl WriteActor {
         name: String,
         writer: Writer,
         read: tokio::sync::broadcast::Receiver<ConnectionMessage>,
+        global_send: Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>,
     ) -> Self {
-        Self { name, writer, read }
+        Self { name, writer, read, global_send }
     }
 
     async fn handle_message(&mut self, msg: ConnectionMessage) {
         match msg {
             ConnectionMessage::Message(_name, msg) => {
-                let _ = self.writer.send(msg).await;
+                if let Err(_) = self.writer.send(msg).await {
+                    let _ = self.global_send.send(ConnectionMessage::WriteError(self.name.clone()));
+                }
             },
             _ => (),
-        
         }
     }
 
@@ -177,9 +181,14 @@ pub struct WriteActorHandle {
 }
 
 impl WriteActorHandle {
-    pub fn new(name: String, writer: Writer, cancel_token: CancellationToken) -> Self {
+    pub fn new(
+        name: String, 
+        writer: Writer, 
+        cancel_token: CancellationToken,
+        global_send: Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>,
+    ) -> Self {
         let (sender, receiver) = tokio::sync::broadcast::channel(8);
-        let mut actor = WriteActor::new(name, writer, receiver);
+        let mut actor = WriteActor::new(name, writer, receiver, global_send);
         tokio::spawn(async move {
             actor.run(cancel_token).await;
         });
@@ -203,7 +212,7 @@ impl Connection {
     pub async fn new(
         name: &str,
         config: Config,
-        reader_send: Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>,
+        global_send: Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>,
     ) -> Result<Self> {
         let request = config
             .url
@@ -217,13 +226,17 @@ impl Connection {
                 let (write_stream, read_stream) = conn.split();
 
                 let cancel_token = CancellationToken::new();
-                let writer =
-                    WriteActorHandle::new(name.to_string(), write_stream, cancel_token.clone());
+                let writer = WriteActorHandle::new(
+                    name.to_string(), 
+                    write_stream, 
+                    cancel_token.clone(),
+                    Arc::clone(&global_send),
+                );
                 let reader = ReadActorHandle::new(
                     name.to_string(),
                     read_stream,
                     cancel_token.clone(),
-                    Arc::clone(&reader_send),
+                    Arc::clone(&global_send),
                 );
 
                 Ok(Self {

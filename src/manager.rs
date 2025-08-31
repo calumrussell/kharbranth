@@ -12,7 +12,7 @@ use crate::{
 pub struct Manager {
     conn: DashMap<String, Connection>,
     write_sends: DashMap<String, Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>>,
-    read_send: Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>,
+    global_send: Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>,
     read_tracker: DashMap<String, u64>,
 }
 
@@ -24,18 +24,18 @@ impl Default for Manager {
 
 impl Manager {
     pub fn new() -> Self {
-        let (read_send, _read_recv) = tokio::sync::broadcast::channel::<ConnectionMessage>(1_028);
+        let (global_send, _global_recv) = tokio::sync::broadcast::channel::<ConnectionMessage>(1_028);
 
         Self {
             conn: DashMap::new(),
             write_sends: DashMap::new(),
-            read_send: Arc::new(read_send),
+            global_send: Arc::new(global_send),
             read_tracker: DashMap::new(),
         }
     }
 
     pub fn read(&self) -> tokio::sync::broadcast::Receiver<ConnectionMessage> {
-        self.read_send.subscribe()
+        self.global_send.subscribe()
     }
 
     pub async fn write(&self, name: &str, message: ConnectionMessage) {
@@ -62,13 +62,13 @@ impl Manager {
     }
 
     pub async fn read_timeout_loop(&self) {
-        let mut read_recv = self.read_send.subscribe();
+        let mut global_recv = self.global_send.subscribe();
         let mut interval = tokio::time::interval(Duration::from_secs(10));
         let mut previous_bytes = HashMap::new();
 
         loop {
             tokio::select! {
-                msg_result = read_recv.recv() => {
+                msg_result = global_recv.recv() => {
                     if let Ok(msg) = msg_result {
                         match msg {
                             ConnectionMessage::Message(conn_name, msg_content) => {
@@ -102,8 +102,8 @@ impl Manager {
     }
 
     pub async fn new_conn(&self, name: &str, config: Config) -> Result<()> {
-        let reader_send = Arc::clone(&self.read_send);
-        let wrapper = Connection::new(name, config, reader_send).await?;
+        let global_send = Arc::clone(&self.global_send);
+        let wrapper = Connection::new(name, config, global_send).await?;
 
         let writer_send_arc = Arc::clone(&wrapper.writer.sender);
         self.conn.insert(name.to_string(), wrapper);
@@ -126,12 +126,15 @@ impl Manager {
     }
 
     pub async fn error_handling_loop(&self) {
-        let mut read_recv = self.read_send.subscribe();
+        let mut global_recv = self.global_send.subscribe();
 
         loop {
-            if let Ok(msg) = read_recv.recv().await {
+            if let Ok(msg) = global_recv.recv().await {
                 match msg {
                     ConnectionMessage::ReadError(conn_name) => {
+                        let _ = self.reconnect(&conn_name).await;
+                    }
+                    ConnectionMessage::WriteError(conn_name) => {
                         let _ = self.reconnect(&conn_name).await;
                     }
                     _ => {}
