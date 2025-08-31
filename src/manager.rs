@@ -22,8 +22,8 @@ pub enum Message {
     BinaryMessage(String, Vec<u8>),
     CloseMessage(String, Option<String>),
     FrameMessage(String, String),
-    ReadError(String),
-    WriteError(String),
+    ReadError(String, String),
+    WriteError(String, String),
     PongReceiveTimeoutError(String),
 }
 
@@ -39,7 +39,7 @@ pub struct Manager {
 
 impl Manager {
     pub fn new() -> Arc<Self> {
-        let (global_send, _global_recv) = tokio::sync::broadcast::channel::<Message>(1_028);
+        let (global_send, _global_recv) = tokio::sync::broadcast::channel::<Message>(4_096);
 
         Arc::new(Self {
             conn: DashMap::new(),
@@ -151,10 +151,10 @@ impl Manager {
         loop {
             if let Ok(msg) = global_recv.recv().await {
                 match msg {
-                    Message::ReadError(conn_name) => {
+                    Message::ReadError(conn_name, _err_str) => {
                         let _ = self.reconnect(&conn_name).await;
                     }
-                    Message::WriteError(conn_name) => {
+                    Message::WriteError(conn_name, _err_str) => {
                         let _ = self.reconnect(&conn_name).await;
                     }
                     Message::PongReceiveTimeoutError(conn_name) => {

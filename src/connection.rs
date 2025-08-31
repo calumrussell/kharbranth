@@ -85,12 +85,14 @@ impl ReadActor {
                                 }
                             }
                         },
-                        Some(Err(_e)) => {
-                            let _ = self.send.send(Message::ReadError(self.name.clone()));
+                        Some(Err(e)) => {
+                            error!("ReadError for {:?}: {:?}", self.name, e);
+                            let _ = self.send.send(Message::ReadError(self.name.clone(), e.to_string()));
                             break;
                         },
                         None => {
-                            let _ = self.send.send(Message::ReadError(self.name.clone()));
+                            error!("ReadError for {:?}: None", self.name);
+                            let _ = self.send.send(Message::ReadError(self.name.clone(), "None".to_string()));
                             break;
                         }
                     }
@@ -241,10 +243,11 @@ impl WriteActor {
             _ => return, // Don't handle error messages or frame messages
         };
 
-        if (self.writer.send(tungstenite_msg).await).is_err() {
+        if let Err(e) = self.writer.send(tungstenite_msg).await {
+            error!("Write Error for {:?}: {:?}", self.name, e.to_string());
             let _ = self
                 .global_send
-                .send(Message::WriteError(self.name.clone()));
+                .send(Message::WriteError(self.name.clone(), e.to_string()));
         }
     }
 
@@ -279,7 +282,7 @@ impl WriteActorHandle {
         cancel_token: CancellationToken,
         global_send: Arc<tokio::sync::broadcast::Sender<Message>>,
     ) -> Self {
-        let (sender, receiver) = tokio::sync::broadcast::channel(8);
+        let (sender, receiver) = tokio::sync::broadcast::channel(512);
         let mut actor = WriteActor::new(name, writer, receiver, global_send);
         tokio::spawn(async move {
             actor.run(cancel_token).await;

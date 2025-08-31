@@ -69,8 +69,8 @@ mod test {
     #[tokio::test]
     async fn message_variants_work() {
         let msg1 = Message::TextMessage("test".to_string(), "hello".to_string());
-        let msg2 = Message::ReadError("test".to_string());
-        let msg3 = Message::WriteError("test".to_string());
+        let msg2 = Message::ReadError("test".to_string(), "error_string".to_string());
+        let msg3 = Message::WriteError("test".to_string(), "error_string".to_string());
         let msg4 = Message::PongReceiveTimeoutError("test".to_string());
 
         match msg1 {
@@ -79,12 +79,12 @@ mod test {
         }
 
         match msg2 {
-            Message::ReadError(name) => assert_eq!(name, "test"),
+            Message::ReadError(name, _err_str) => assert_eq!(name, "test"),
             _ => panic!("Expected ReadError variant"),
         }
 
         match msg3 {
-            Message::WriteError(name) => assert_eq!(name, "test"),
+            Message::WriteError(name, _err_str) => assert_eq!(name, "test"),
             _ => panic!("Expected WriteError variant"),
         }
 
