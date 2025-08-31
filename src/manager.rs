@@ -27,7 +27,8 @@ impl Default for Manager {
 
 impl Manager {
     pub fn new() -> Self {
-        let (global_send, _global_recv) = tokio::sync::broadcast::channel::<ConnectionMessage>(1_028);
+        let (global_send, _global_recv) =
+            tokio::sync::broadcast::channel::<ConnectionMessage>(1_028);
 
         Self {
             conn: DashMap::new(),
@@ -108,7 +109,8 @@ impl Manager {
     pub async fn ping_loop(&self, name: &str, config: Config, cancel_token: CancellationToken) {
         let mut ping_duration = tokio::time::interval(Duration::from_secs(config.ping_duration));
         let mut ping_timeout = tokio::time::interval(Duration::from_secs(config.ping_timeout));
-        let ping_msg_bytes: tokio_tungstenite::tungstenite::Bytes = config.ping_message.clone().into();
+        let ping_msg_bytes: tokio_tungstenite::tungstenite::Bytes =
+            config.ping_message.clone().into();
         let mut global_recv = self.global_send.subscribe();
         loop {
             tokio::select! {
@@ -150,7 +152,10 @@ impl Manager {
         let config = if let Some(conn) = self.conn.get(name) {
             conn.config.clone()
         } else {
-            return Err(anyhow::anyhow!("Connection '{}' not found for reconnect", name));
+            return Err(anyhow::anyhow!(
+                "Connection '{}' not found for reconnect",
+                name
+            ));
         };
 
         self.close_conn(name).await;
@@ -166,17 +171,16 @@ impl Manager {
         loop {
             if let Ok(msg) = global_recv.recv().await {
                 match msg {
-                    ConnectionMessage::Message(name, msg) => {
-                        match msg {
-                            Message::Ping(val) => {
-                                if let Some(conn_writer) = self.write_sends.get(&name) {
-                                    let _ = conn_writer.send(ConnectionMessage::Message(name, Message::Pong(val)));
-                                }
-                            },
-                            _ => {},
+                    ConnectionMessage::Message(name, msg) => match msg {
+                        Message::Ping(val) => {
+                            if let Some(conn_writer) = self.write_sends.get(&name) {
+                                let _ = conn_writer
+                                    .send(ConnectionMessage::Message(name, Message::Pong(val)));
+                            }
                         }
+                        _ => {}
                     },
-                    _ => {},
+                    _ => {}
                 }
             }
         }

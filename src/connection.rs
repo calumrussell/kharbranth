@@ -142,16 +142,23 @@ impl WriteActor {
         read: tokio::sync::broadcast::Receiver<ConnectionMessage>,
         global_send: Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>,
     ) -> Self {
-        Self { name, writer, read, global_send }
+        Self {
+            name,
+            writer,
+            read,
+            global_send,
+        }
     }
 
     async fn handle_message(&mut self, msg: ConnectionMessage) {
         match msg {
             ConnectionMessage::Message(_name, msg) => {
                 if let Err(_) = self.writer.send(msg).await {
-                    let _ = self.global_send.send(ConnectionMessage::WriteError(self.name.clone()));
+                    let _ = self
+                        .global_send
+                        .send(ConnectionMessage::WriteError(self.name.clone()));
                 }
-            },
+            }
             _ => (),
         }
     }
@@ -182,8 +189,8 @@ pub struct WriteActorHandle {
 
 impl WriteActorHandle {
     pub fn new(
-        name: String, 
-        writer: Writer, 
+        name: String,
+        writer: Writer,
         cancel_token: CancellationToken,
         global_send: Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>,
     ) -> Self {
@@ -227,8 +234,8 @@ impl Connection {
 
                 let cancel_token = CancellationToken::new();
                 let writer = WriteActorHandle::new(
-                    name.to_string(), 
-                    write_stream, 
+                    name.to_string(),
+                    write_stream,
                     cancel_token.clone(),
                     Arc::clone(&global_send),
                 );

@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use anyhow::Result;
-use kharbranth::{Config, Manager, ConnectionMessage};
+use kharbranth::{Config, ConnectionMessage, Manager};
 use log::info;
 use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
@@ -63,7 +63,7 @@ async fn main() -> Result<()> {
                             info!("Parsed JSON: {}", parsed);
                         }
                     }
-                },
+                }
                 _ => (),
             }
         }
@@ -74,7 +74,7 @@ async fn main() -> Result<()> {
     // Send subscription message
     let subscription_msg = ConnectionMessage::Message(
         "hyperliquid".to_string(),
-        Message::Text(subscribe_json.into())
+        Message::Text(subscribe_json.into()),
     );
     manager.write("hyperliquid", subscription_msg.clone()).await;
 
@@ -88,6 +88,6 @@ async fn main() -> Result<()> {
 
     info!("Closing connection...");
     manager.close_conn("hyperliquid").await;
-    
+
     Ok(())
 }
