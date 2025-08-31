@@ -123,3 +123,20 @@ impl Manager {
         }
     }
 }
+
+impl Drop for Manager {
+    fn drop(&mut self) {
+        for token in self.cancel_tokens.iter() {
+            token.cancel();
+        }
+        
+        for entry in self.write_sends.iter() {
+            let name = entry.key().clone();
+            let sender = entry.value();
+            let _ = sender.send(ConnectionMessage::Message(
+                name,
+                Message::Close(None)
+            ));
+        }
+    }
+}
