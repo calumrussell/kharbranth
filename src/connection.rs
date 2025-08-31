@@ -8,13 +8,11 @@ use futures_util::{
 };
 use log::{debug, error};
 use tokio::net::TcpStream;
-use tokio_tungstenite::{
-    WebSocketStream, connect_async,
-    tungstenite::{Message, client::IntoClientRequest},
-};
+use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
+use tokio_tungstenite::{WebSocketStream, connect_async, tungstenite::client::IntoClientRequest};
 use tokio_util::sync::CancellationToken;
 
-use crate::config::Config;
+use crate::{config::Config, manager::Message};
 
 #[derive(Debug)]
 pub enum ConnectionError {
@@ -33,28 +31,20 @@ impl std::fmt::Display for ConnectionError {
 
 impl std::error::Error for ConnectionError {}
 
-#[derive(Clone, Debug)]
-pub enum ConnectionMessage {
-    Message(String, Message),
-    ReadError(String),
-    WriteError(String),
-    PongReceiveTimeoutError(String),
-}
-
 type Reader = SplitStream<WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>>;
 
 pub struct ReadActor {
     name: String,
     reader: Reader,
     bytes_recv: u64,
-    send: Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>,
+    send: Arc<tokio::sync::broadcast::Sender<Message>>,
 }
 
 impl ReadActor {
     fn new(
         name: String,
         reader: Reader,
-        send: Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>,
+        send: Arc<tokio::sync::broadcast::Sender<Message>>,
     ) -> Self {
         Self {
             name,
@@ -71,14 +61,36 @@ impl ReadActor {
                     match msg_result {
                         Some(Ok(msg)) => {
                             self.bytes_recv += msg.len() as u64;
-                            let _ = self.send.send(ConnectionMessage::Message(self.name.clone(), msg));
+                            match msg {
+                                TungsteniteMessage::Ping(data) => {
+                                    let text = String::from_utf8_lossy(&data).to_string();
+                                    let _ = self.send.send(Message::PingMessage(self.name.clone(), text));
+                                },
+                                TungsteniteMessage::Pong(data) => {
+                                    let text = String::from_utf8_lossy(&data).to_string();
+                                    let _ = self.send.send(Message::PongMessage(self.name.clone(), text));
+                                },
+                                TungsteniteMessage::Text(text) => {
+                                    let _ = self.send.send(Message::TextMessage(self.name.clone(), text.to_string()));
+                                },
+                                TungsteniteMessage::Binary(data) => {
+                                    let _ = self.send.send(Message::BinaryMessage(self.name.clone(), data.to_vec()));
+                                },
+                                TungsteniteMessage::Close(close_frame) => {
+                                    let reason = close_frame.map(|f| f.reason.to_string());
+                                    let _ = self.send.send(Message::CloseMessage(self.name.clone(), reason));
+                                },
+                                TungsteniteMessage::Frame(_frame) => {
+                                    let _ = self.send.send(Message::FrameMessage(self.name.clone(), "Raw frame received".to_string()));
+                                }
+                            }
                         },
                         Some(Err(_e)) => {
-                            let _ = self.send.send(ConnectionMessage::ReadError(self.name.clone()));
+                            let _ = self.send.send(Message::ReadError(self.name.clone()));
                             break;
                         },
                         None => {
-                            let _ = self.send.send(ConnectionMessage::ReadError(self.name.clone()));
+                            let _ = self.send.send(Message::ReadError(self.name.clone()));
                             break;
                         }
                     }
@@ -95,8 +107,8 @@ pub struct ReadActorHandle;
 pub struct PingActor {
     name: String,
     config: Config,
-    writer_send: Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>,
-    global_recv: tokio::sync::broadcast::Receiver<ConnectionMessage>,
+    writer_send: Arc<tokio::sync::broadcast::Sender<Message>>,
+    global_recv: tokio::sync::broadcast::Receiver<Message>,
     last_pong_time: Option<i64>,
 }
 
@@ -104,8 +116,8 @@ impl PingActor {
     fn new(
         name: String,
         config: Config,
-        writer_send: Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>,
-        global_recv: tokio::sync::broadcast::Receiver<ConnectionMessage>,
+        writer_send: Arc<tokio::sync::broadcast::Sender<Message>>,
+        global_recv: tokio::sync::broadcast::Receiver<Message>,
     ) -> Self {
         Self {
             name,
@@ -126,23 +138,23 @@ impl PingActor {
         loop {
             tokio::select! {
                 _ = ping_duration.tick() => {
-                    let _ = self.writer_send.send(ConnectionMessage::Message(
+                    let ping_text = String::from_utf8_lossy(&ping_msg_bytes).to_string();
+                    let _ = self.writer_send.send(Message::PingMessage(
                         self.name.clone(),
-                        Message::Ping(ping_msg_bytes.clone())
+                        ping_text
                     ));
                 },
                 _ = ping_timeout.tick() => {
                     let now = Local::now().timestamp();
                     if let Some(last_pong) = self.last_pong_time
                         && now - last_pong > self.config.ping_timeout as i64 {
-                        let _ = self.writer_send.send(ConnectionMessage::PongReceiveTimeoutError(self.name.clone()));
+                        let _ = self.writer_send.send(Message::PongReceiveTimeoutError(self.name.clone()));
                     }
                 },
                 _ = cancel_token.cancelled() => break,
                 msg_result = self.global_recv.recv() => {
-                    if let Ok(ConnectionMessage::Message(conn_name, conn_msg)) = msg_result
-                        && conn_name == self.name
-                        && let Message::Pong(_val) = conn_msg {
+                    if let Ok(Message::PongMessage(conn_name, _val)) = msg_result
+                        && conn_name == self.name {
                         self.last_pong_time = Some(Local::now().timestamp());
                     }
                 }
@@ -158,8 +170,8 @@ impl PingActorHandle {
     pub fn new(
         name: String,
         config: Config,
-        writer_send: Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>,
-        global_send: Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>,
+        writer_send: Arc<tokio::sync::broadcast::Sender<Message>>,
+        global_send: Arc<tokio::sync::broadcast::Sender<Message>>,
         cancel_token: CancellationToken,
     ) -> Self {
         let global_recv = global_send.subscribe();
@@ -177,7 +189,7 @@ impl ReadActorHandle {
         name: String,
         reader: Reader,
         cancel_token: CancellationToken,
-        sender: Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>,
+        sender: Arc<tokio::sync::broadcast::Sender<Message>>,
     ) -> Self {
         let mut actor = ReadActor::new(name, reader, Arc::clone(&sender));
         tokio::spawn(async move {
@@ -188,21 +200,22 @@ impl ReadActorHandle {
     }
 }
 
-type Writer = SplitSink<WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>, Message>;
+type Writer =
+    SplitSink<WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>, TungsteniteMessage>;
 
 pub struct WriteActor {
     name: String,
     writer: Writer,
-    read: tokio::sync::broadcast::Receiver<ConnectionMessage>,
-    global_send: Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>,
+    read: tokio::sync::broadcast::Receiver<Message>,
+    global_send: Arc<tokio::sync::broadcast::Sender<Message>>,
 }
 
 impl WriteActor {
     fn new(
         name: String,
         writer: Writer,
-        read: tokio::sync::broadcast::Receiver<ConnectionMessage>,
-        global_send: Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>,
+        read: tokio::sync::broadcast::Receiver<Message>,
+        global_send: Arc<tokio::sync::broadcast::Sender<Message>>,
     ) -> Self {
         Self {
             name,
@@ -212,13 +225,26 @@ impl WriteActor {
         }
     }
 
-    async fn handle_message(&mut self, msg: ConnectionMessage) {
-        if let ConnectionMessage::Message(_name, msg) = msg
-            && (self.writer.send(msg).await).is_err()
-        {
+    async fn handle_message(&mut self, msg: Message) {
+        let tungstenite_msg = match msg {
+            Message::PingMessage(_name, data) => TungsteniteMessage::Ping(data.into_bytes().into()),
+            Message::PongMessage(_name, data) => TungsteniteMessage::Pong(data.into_bytes().into()),
+            Message::TextMessage(_name, text) => TungsteniteMessage::Text(text.into()),
+            Message::BinaryMessage(_name, data) => TungsteniteMessage::Binary(data.into()),
+            Message::CloseMessage(_name, reason) => {
+                let close_frame = reason.map(|r| tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                    code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Normal,
+                    reason: r.into(),
+                });
+                TungsteniteMessage::Close(close_frame)
+            }
+            _ => return, // Don't handle error messages or frame messages
+        };
+
+        if (self.writer.send(tungstenite_msg).await).is_err() {
             let _ = self
                 .global_send
-                .send(ConnectionMessage::WriteError(self.name.clone()));
+                .send(Message::WriteError(self.name.clone()));
         }
     }
 
@@ -243,7 +269,7 @@ impl WriteActor {
 
 #[derive(Clone)]
 pub struct WriteActorHandle {
-    pub sender: Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>,
+    pub sender: Arc<tokio::sync::broadcast::Sender<Message>>,
 }
 
 impl WriteActorHandle {
@@ -251,7 +277,7 @@ impl WriteActorHandle {
         name: String,
         writer: Writer,
         cancel_token: CancellationToken,
-        global_send: Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>,
+        global_send: Arc<tokio::sync::broadcast::Sender<Message>>,
     ) -> Self {
         let (sender, receiver) = tokio::sync::broadcast::channel(8);
         let mut actor = WriteActor::new(name, writer, receiver, global_send);
@@ -280,7 +306,7 @@ impl Connection {
     pub async fn new(
         name: &str,
         config: Config,
-        global_send: Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>,
+        global_send: Arc<tokio::sync::broadcast::Sender<Message>>,
         cancel_token: CancellationToken,
     ) -> Result<Self> {
         let request = match config.url.clone().into_client_request() {

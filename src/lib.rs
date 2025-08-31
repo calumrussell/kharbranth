@@ -3,15 +3,13 @@ mod connection;
 mod manager;
 
 pub use config::Config;
-pub use connection::ConnectionMessage;
-pub use manager::Manager;
+pub use manager::{Manager, Message};
 
 #[cfg(test)]
 mod test {
     use std::time::Duration;
 
-    use crate::{Config, ConnectionMessage, Manager};
-    use tokio_tungstenite::tungstenite::Message;
+    use crate::{Config, Manager, Message};
 
     fn create_test_config(name: &str, url: &str) -> Config {
         Config {
@@ -37,8 +35,7 @@ mod test {
     async fn manager_handles_write_to_nonexistent_connection() {
         let manager = Manager::new();
 
-        let message =
-            ConnectionMessage::Message("nonexistent".to_string(), Message::Text("test".into()));
+        let message = Message::TextMessage("nonexistent".to_string(), "test".to_string());
         manager.write("nonexistent", message).await;
     }
 
@@ -70,29 +67,29 @@ mod test {
     }
 
     #[tokio::test]
-    async fn connection_message_variants_work() {
-        let msg1 = ConnectionMessage::Message("test".to_string(), Message::Text("hello".into()));
-        let msg2 = ConnectionMessage::ReadError("test".to_string());
-        let msg3 = ConnectionMessage::WriteError("test".to_string());
-        let msg4 = ConnectionMessage::PongReceiveTimeoutError("test".to_string());
+    async fn message_variants_work() {
+        let msg1 = Message::TextMessage("test".to_string(), "hello".to_string());
+        let msg2 = Message::ReadError("test".to_string());
+        let msg3 = Message::WriteError("test".to_string());
+        let msg4 = Message::PongReceiveTimeoutError("test".to_string());
 
         match msg1 {
-            ConnectionMessage::Message(name, _) => assert_eq!(name, "test"),
-            _ => panic!("Expected Message variant"),
+            Message::TextMessage(name, _) => assert_eq!(name, "test"),
+            _ => panic!("Expected TextMessage variant"),
         }
 
         match msg2 {
-            ConnectionMessage::ReadError(name) => assert_eq!(name, "test"),
+            Message::ReadError(name) => assert_eq!(name, "test"),
             _ => panic!("Expected ReadError variant"),
         }
 
         match msg3 {
-            ConnectionMessage::WriteError(name) => assert_eq!(name, "test"),
+            Message::WriteError(name) => assert_eq!(name, "test"),
             _ => panic!("Expected WriteError variant"),
         }
 
         match msg4 {
-            ConnectionMessage::PongReceiveTimeoutError(name) => assert_eq!(name, "test"),
+            Message::PongReceiveTimeoutError(name) => assert_eq!(name, "test"),
             _ => panic!("Expected PongReceiveTimeoutError variant"),
         }
     }
