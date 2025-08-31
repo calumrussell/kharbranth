@@ -22,26 +22,26 @@ This is used to subscribe to crypto exchange websocket feeds.
 
 ### Two-Layer Design
 
-#### Layer 1: Connection (`Connection<S>`)
-- Generic WebSocket connection wrapper
+#### Layer 1: Connection
+- WebSocket connection wrapper with actor-based design
 - Handles individual connection lifecycle
-- Manages read/write splitting and concurrent operations
-- Implements ping/pong heartbeat protocol
-- Provides hook system for message processing
+- Manages read/write splitting with separate async actors
+- Implements ping/pong heartbeat protocol with timeout detection
+- Converts WebSocket frames to typed Message enum variants
 
-#### Layer 2: Manager (`WSManager`)
+#### Layer 2: Manager
 - Manages multiple named connections
 - Provides connection pooling with thread-safe access
 - Handles broadcasting for connection control
-- Implements reconnection logic with exponential backoff
+- Implements reconnection logic with configurable timeouts
 
 ### Key Design Decisions
 
-#### Generic Stream Support
-The `Connection<S>` type is generic over stream types, making it testable with mock streams while supporting real TLS WebSocket connections in production.
+#### Actor-Based Architecture
+The library uses separate actors for read, write, and ping operations on each connection. This allows concurrent operations while maintaining thread safety and proper resource management.
 
-#### Hook-Based Message Processing
-Instead of forcing a specific message processing pattern, the library provides hooks (`ReadHooks`) that allow users to define custom handlers for different WebSocket frame types.
+#### Message-Based Communication
+All WebSocket frames and system events are represented by a unified `Message` enum that flows through broadcast channels, enabling flexible message routing and handling.
 
 #### Shared State Management
 Uses `Arc<DashMap<>>` pattern for thread-safe shared state between async tasks, enabling concurrent read/write operations while maintaining memory safety and performance.
@@ -64,45 +64,53 @@ Log levels should be used to enable debugging. Key paths should be covered by lo
 
 ### Core Types
 
-#### `Connection<S>`
-Generic WebSocket connection wrapper that manages:
-- Read/write stream splitting
+#### `Connection`
+WebSocket connection wrapper that manages:
+- Read/write stream splitting with separate actors
 - Ping/pong heartbeat mechanism
-- Message hooks for different WebSocket frame types
 - Connection lifecycle management
+- Integration with the Manager's message system
 
-#### `WSManager`
+#### `Manager`
 Connection manager that handles:
 - Multiple named connections in a DashMap
 - Connection pooling with Arc<DashMap<>>
 - Automatic reconnection logic
 - Broadcasting system for connection control
+- Global message distribution across all connections
 
-#### `ReadHooks`
-Callback system for handling different WebSocket message types:
-- `on_text`: Text message handler
-- `on_binary`: Binary message handler  
-- `on_ping`/`on_pong`: Ping/pong handlers
-- `on_close`: Close frame handler
-- `on_frame`: Raw frame handler
+#### `Message`
+Enum representing all possible WebSocket message types and system events:
+- `PingMessage(String, String)`: Connection name + ping data
+- `PongMessage(String, String)`: Connection name + pong data
+- `TextMessage(String, String)`: Connection name + text content
+- `BinaryMessage(String, Vec<u8>)`: Connection name + binary data
+- `CloseMessage(String, Option<String>)`: Connection name + optional close reason
+- `FrameMessage(String, String)`: Connection name + frame information
+- `ReadError(String)`: Connection name with read error
+- `WriteError(String)`: Connection name with write error
+- `PongReceiveTimeoutError(String)`: Connection name with pong timeout
 
 #### `ConnectionError`
 Custom error types for WebSocket operations:
-- `PingFailed`: Ping operation failed
-- `PongReceiveTimeout`: Pong response timeout
-- `ReadError`/`WriteError`: I/O errors
-- `ConnectionDropped`: Connection lost
-- `ConnectionNotFound`: Named connection not found
+- `ConnectionInitFailed(String)`: Connection initialization failed with details
 
 ## Key Patterns
 
-WsManager is the key abstraction used by callers. This should hide the details of the underlying websocket connection. 
+Manager is the key abstraction used by callers. This should hide the details of the underlying websocket connection.
 
-Users name a connection, WsManager supports read and write functions against the named connections.
+### Usage Pattern
+1. **Connection Management**: Users create named connections via `Manager::new_conn(name, config)`
+2. **Message Reading**: Users call `Manager::read()` to get a broadcast receiver for all messages from all connections
+3. **Message Writing**: Users call `Manager::write(name, message)` to send messages to specific connections
+4. **Connection Control**: Users can reconnect (`Manager::reconnect()`) or close (`Manager::close_conn()`) connections
 
-Users interact through named connections and WsManager supports write functions.
+### Message Flow
+- All incoming WebSocket frames are converted to `Message` enum variants and broadcast globally
+- Users receive typed messages indicating both the connection name and message content
+- Outgoing messages are sent to specific connections via the connection name
 
-Config options provide constant behaviour. ReadHooks provide a way to hook into read operations. Callers are able to restart connections through a tokio channel.
+Config options provide constant behavior. The Manager handles automatic reconnection when errors occur or pong timeouts happen.
 
 ## Performance Characteristics
 
@@ -213,10 +221,10 @@ Follow the existing pattern seen in recent commits:
 
 The library is designed for extensibility:
 
-1. **Custom Stream Types**: Implement custom stream types for specialized transports
-2. **Message Hooks**: Add custom processing logic for different message types
-3. **Error Handling**: Extend `ConnectionError` for domain-specific error types
-4. **Connection Strategies**: Customize reconnection and retry logic
+1. **Message Processing**: Handle different `Message` enum variants in your application logic
+2. **Error Handling**: Extend `ConnectionError` for domain-specific error types  
+3. **Connection Strategies**: Customize reconnection and retry logic through Config
+4. **Protocol Support**: The actor-based design supports extending to different WebSocket protocols
 
 ## GitHub Actions
 

@@ -1,11 +1,10 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use kharbranth::{Config, ConnectionMessage, Manager};
+use kharbranth::{Config, Manager, Message};
 use log::info;
 use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
-use tokio_tungstenite::tungstenite::Message;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct HyperliquidSubscribe {
@@ -55,21 +54,12 @@ async fn main() -> Result<()> {
     let mut read_channel = manager.read();
     tokio::spawn(async move {
         while let Ok(msg) = read_channel.recv().await {
-            if let ConnectionMessage::Message(conn_name, message) = msg {
-                info!("Received from {}: {:?}", conn_name, message);
-                if let Message::Text(text) = message
-                    && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
-                    info!("Parsed JSON: {}", parsed);
-                }
-            }
+            info!("Received message: {:?}", msg);
         }
     });
 
     sleep(Duration::from_secs(2)).await;
-    let subscription_msg = ConnectionMessage::Message(
-        "hyperliquid".to_string(),
-        Message::Text(subscribe_json.into()),
-    );
+    let subscription_msg = Message::TextMessage("hyperliquid".to_string(), subscribe_json);
     manager.write("hyperliquid", subscription_msg.clone()).await;
 
     sleep(Duration::from_secs(5)).await;
