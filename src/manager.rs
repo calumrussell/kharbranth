@@ -1,246 +1,185 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
-
-use anyhow::{Error, anyhow};
-use dashmap::DashMap;
-use log::{error, info};
-use tokio::{
-    sync::{RwLock, broadcast},
-    task::JoinHandle,
-    time::sleep,
+use std::{
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
 };
+
+use anyhow::Result;
+use dashmap::DashMap;
+use log::error;
+use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
-    config::{BroadcastMessage, BroadcastMessageType, Config},
-    connection::{Connection, ConnectionError},
-    hooks::ReadHooks,
-    types::{ConnectionResult, HookType},
+    config::Config,
+    connection::{Connection, ConnectionMessage},
 };
 
-type ConnectionType = Connection<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
-
-pub struct WSManager {
-    pub conn: Arc<DashMap<String, Arc<RwLock<ConnectionType>>>>,
-    restart_tx: broadcast::Sender<BroadcastMessage>,
+pub struct Manager {
+    conn: DashMap<String, Connection>,
+    write_sends: DashMap<String, Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>>,
+    global_send: Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>,
+    cancel_tokens: DashMap<String, CancellationToken>,
+    loops_started: AtomicBool,
+    pong_handle: OnceLock<JoinHandle<()>>,
+    error_handle: OnceLock<JoinHandle<()>>,
 }
 
-impl Default for WSManager {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+impl Manager {
+    pub fn new() -> Arc<Self> {
+        let (global_send, _global_recv) =
+            tokio::sync::broadcast::channel::<ConnectionMessage>(1_028);
 
-impl Clone for WSManager {
-    fn clone(&self) -> Self {
-        Self {
-            conn: Arc::clone(&self.conn),
-            restart_tx: self.restart_tx.clone(),
-        }
-    }
-}
-
-impl WSManager {
-    pub fn new() -> Self {
-        let (restart_tx, _) = broadcast::channel(16);
-        Self {
-            conn: Arc::new(DashMap::new()),
-            restart_tx,
-        }
+        Arc::new(Self {
+            conn: DashMap::new(),
+            write_sends: DashMap::new(),
+            global_send: Arc::new(global_send),
+            cancel_tokens: DashMap::new(),
+            loops_started: AtomicBool::new(false),
+            pong_handle: OnceLock::new(),
+            error_handle: OnceLock::new(),
+        })
     }
 
-    pub async fn add_hook(&mut self, name: &str, hook: HookType) {
-        if let Some(conn) = self.conn.get(name) {
-            let mut conn_lock = conn.write().await;
-            conn_lock.add_hook(hook);
-        }
-    }
-
-    pub async fn add_text_hook<F>(&mut self, name: &str, handler: F)
-    where
-        F: Fn(String) + Send + Sync + 'static,
-    {
-        let hook = HookType::Text(Box::new(move |utf8_bytes| {
-            handler(utf8_bytes.to_string());
-        }));
-        self.add_hook(name, hook).await;
-    }
-
-    pub async fn add_binary_hook<F>(&mut self, name: &str, handler: F)
-    where
-        F: Fn(Vec<u8>) + Send + Sync + 'static,
-    {
-        let hook = HookType::Binary(Box::new(move |bytes| {
-            handler(bytes.to_vec());
-        }));
-        self.add_hook(name, hook).await;
-    }
-
-    pub async fn add_ping_hook<F>(&mut self, name: &str, handler: F)
-    where
-        F: Fn(Vec<u8>) + Send + Sync + 'static,
-    {
-        let hook = HookType::Ping(Box::new(move |bytes| {
-            handler(bytes.to_vec());
-        }));
-        self.add_hook(name, hook).await;
-    }
-
-    pub async fn add_pong_hook<F>(&mut self, name: &str, handler: F)
-    where
-        F: Fn(Vec<u8>) + Send + Sync + 'static,
-    {
-        let hook = HookType::Pong(Box::new(move |bytes| {
-            handler(bytes.to_vec());
-        }));
-        self.add_hook(name, hook).await;
-    }
-
-    pub async fn add_close_hook<F>(&mut self, name: &str, handler: F)
-    where
-        F: Fn(Option<tokio_tungstenite::tungstenite::protocol::CloseFrame>) + Send + Sync + 'static,
-    {
-        let hook = HookType::Close(Box::new(handler));
-        self.add_hook(name, hook).await;
-    }
-
-    pub async fn new_conn(&mut self, name: &str, config: Config) {
-        let conn = Connection::new(config, ReadHooks::new());
-        self.conn
-            .insert(name.to_string(), Arc::new(RwLock::new(conn)));
-    }
-
-    async fn wait_for_reconnect(conn: Arc<RwLock<ConnectionType>>, name: String) {
-        let locked_conn = conn.read().await;
-        let reconnect_timeout = locked_conn.config.reconnect_timeout;
-        info!(
-            "{}: Waiting for {} seconds before reconnecting",
-            name, reconnect_timeout
-        );
-        drop(locked_conn);
-        sleep(Duration::from_secs(reconnect_timeout)).await;
-    }
-
-    async fn attempt_connection(
-        conn: Arc<RwLock<ConnectionType>>,
-        name: String,
-    ) -> Result<(JoinHandle<ConnectionResult>, JoinHandle<ConnectionResult>), Error> {
-        let mut locked_conn = conn.write().await;
-        info!(
-            "{}: Attempting connection to {}",
-            name, locked_conn.config.url
-        );
-        locked_conn.start_loop().await
-    }
-
-    async fn handle_connection_success(
-        read_handle: JoinHandle<ConnectionResult>,
-        ping_handle: JoinHandle<ConnectionResult>,
-        tx: broadcast::Sender<BroadcastMessage>,
-        name: String,
-    ) {
-        info!("{}: Connected", name);
-
-        let rx_clone = tx.subscribe();
-        let restart_handler = Self::create_restart_handler(rx_clone, name.clone());
-        let read_abort = read_handle.abort_handle();
-        let ping_abort = ping_handle.abort_handle();
-
-        tokio::select! {
-            _ = restart_handler => {
-                read_abort.abort();
-                ping_abort.abort();
-            },
-            maybe_read_result = read_handle => {
-                if let Ok(Err(e)) = maybe_read_result {
-                    error!("Read loop error: {:?}", e);
-                }
-                ping_abort.abort();
-            },
-            maybe_ping_result = ping_handle => {
-                if let Ok(Err(e)) = maybe_ping_result {
-                    error!("Ping loop error: {:?}", e);
-                }
-                read_abort.abort();
-            }
-        }
-    }
-
-    async fn run_connection_manager(
-        conn: Arc<RwLock<ConnectionType>>,
-        name: String,
-        tx: broadcast::Sender<BroadcastMessage>,
-    ) {
-        loop {
-            match Self::attempt_connection(conn.clone(), name.clone()).await {
-                Ok((read_handle, ping_handle)) => {
-                    Self::handle_connection_success(
-                        read_handle,
-                        ping_handle,
-                        tx.clone(),
-                        name.clone(),
-                    )
-                    .await;
-                }
-                Err(e) => {
-                    error!("{}: Connection attempt failed with: {:?}", name, e);
-                }
-            }
-            Self::wait_for_reconnect(conn.clone(), name.clone()).await;
-        }
-    }
-
-    async fn create_restart_handler(mut rx: broadcast::Receiver<BroadcastMessage>, name: String) {
-        while let Ok(msg) = rx.recv().await {
-            if msg.target == name {
-                if let Ok(msg_type) = msg.action.try_into() {
-                    match msg_type {
-                        BroadcastMessageType::Restart => {
-                            error!("{}: Received abort message", name);
-                            return;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    pub fn start(&self) -> HashMap<String, JoinHandle<()>> {
-        let mut res = HashMap::with_capacity(self.conn.len());
-
-        for entry in &*self.conn {
-            let name = entry.key().clone();
-            let conn = Arc::clone(entry.value());
-            let tx = self.restart_tx.clone();
-
-            let name_for_task = name.clone();
-            let manager_handle = tokio::spawn(async move {
-                Self::run_connection_manager(conn, name_for_task, tx).await;
+    fn ensure_loops_started(self: &Arc<Self>) {
+        if self
+            .loops_started
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            let manager_clone1 = Arc::clone(self);
+            let _pong_handle = tokio::spawn(async move {
+                manager_clone1.pong_loop().await;
             });
 
-            res.insert(name, manager_handle);
+            let manager_clone2 = Arc::clone(self);
+            let _error_handle = tokio::spawn(async move {
+                manager_clone2.error_handling_loop().await;
+            });
+
+            let _ = self.pong_handle.set(_pong_handle);
+            let _ = self.error_handle.set(_error_handle);
         }
-        res
     }
 
-    pub fn restart(&self, name: &str) -> Result<(), Error> {
-        let msg = BroadcastMessage {
-            target: name.to_string(),
-            action: 0, // BroadcastMessageType::Restart
+    pub fn read(self: &Arc<Self>) -> tokio::sync::broadcast::Receiver<ConnectionMessage> {
+        self.global_send.subscribe()
+    }
+
+    pub async fn write(self: &Arc<Self>, name: &str, message: ConnectionMessage) {
+        if let Some(sender) = self.write_sends.get(name) {
+            let _ = sender.send(message);
+        }
+    }
+
+    pub async fn close_conn(self: &Arc<Self>, name: &str) {
+        if let Some(writer) = self.write_sends.get(name) {
+            let _ = writer.send(ConnectionMessage::Message(
+                name.to_string(),
+                Message::Close(None),
+            ));
+        }
+
+        if let Some(cancel_token) = self.cancel_tokens.get(name) {
+            cancel_token.cancel();
+        }
+
+        self.write_sends.remove(&name.to_string());
+        self.conn.remove(&name.to_string());
+        self.cancel_tokens.remove(&name.to_string());
+    }
+
+    pub async fn new_conn(self: &Arc<Self>, name: &str, config: Config) {
+        self.ensure_loops_started();
+        let global_send = Arc::clone(&self.global_send);
+        let cancel_token = CancellationToken::new();
+
+        match Connection::new(name, config.clone(), global_send, cancel_token.clone()).await {
+            Ok(wrapper) => {
+                let writer_send_arc = Arc::clone(&wrapper.writer.sender);
+                self.conn.insert(name.to_string(), wrapper);
+                self.write_sends.insert(name.to_string(), writer_send_arc);
+                self.cancel_tokens
+                    .insert(name.to_string(), cancel_token.clone());
+            }
+            Err(e) => {
+                error!("Failed to create connection '{}': {}", name, e);
+            }
+        }
+    }
+
+    pub async fn reconnect(self: &Arc<Self>, name: &str) -> Result<()> {
+        let config = if let Some(conn) = self.conn.get(name) {
+            conn.config.clone()
+        } else {
+            return Err(anyhow::anyhow!(
+                "Connection '{}' not found for reconnect",
+                name
+            ));
         };
-        self.restart_tx.send(msg).map_err(|e| anyhow!("Failed to send restart signal: {}", e))?;
+
+        self.close_conn(name).await;
+        tokio::time::sleep(Duration::from_secs(config.reconnect_timeout)).await;
+
+        self.new_conn(name, config).await;
         Ok(())
     }
 
-    pub async fn write(&self, name: &str, msg: Message) -> ConnectionResult {
-        if let Some(conn) = self.conn.get(name) {
-            let msg_debug = format!("{:?}", msg);
-            let mut locked_conn = conn.write().await;
-            return locked_conn.write(msg).await.map_err(|e| {
-                anyhow!("Failed to write message to connection '{}': {} (message: {})", name, e, msg_debug)
-            });
+    pub async fn pong_loop(self: &Arc<Self>) {
+        let mut global_recv = self.global_send.subscribe();
+
+        loop {
+            if let Ok(ConnectionMessage::Message(name, Message::Ping(val))) =
+                global_recv.recv().await
+                && let Some(conn_writer) = self.write_sends.get(&name)
+            {
+                let _ = conn_writer.send(ConnectionMessage::Message(name, Message::Pong(val)));
+            }
         }
-        Err(anyhow!(ConnectionError::ConnectionNotFound(
-            format!("Connection '{}' not found when attempting to write message: {:?}", name, msg)
-        )))
+    }
+
+    pub async fn error_handling_loop(self: &Arc<Self>) {
+        let mut global_recv = self.global_send.subscribe();
+
+        loop {
+            if let Ok(msg) = global_recv.recv().await {
+                match msg {
+                    ConnectionMessage::ReadError(conn_name) => {
+                        let _ = self.reconnect(&conn_name).await;
+                    }
+                    ConnectionMessage::WriteError(conn_name) => {
+                        let _ = self.reconnect(&conn_name).await;
+                    }
+                    ConnectionMessage::PongReceiveTimeoutError(conn_name) => {
+                        let _ = self.reconnect(&conn_name).await;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+impl Drop for Manager {
+    fn drop(&mut self) {
+        for token in self.cancel_tokens.iter() {
+            token.cancel();
+        }
+
+        for entry in self.write_sends.iter() {
+            let name = entry.key().clone();
+            let sender = entry.value();
+            let _ = sender.send(ConnectionMessage::Message(name, Message::Close(None)));
+        }
+
+        if let Some(pong_handle) = self.pong_handle.get() {
+            pong_handle.abort();
+        }
+        if let Some(error_handle) = self.error_handle.get() {
+            error_handle.abort();
+        }
     }
 }

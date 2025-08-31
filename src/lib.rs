@@ -1,286 +1,110 @@
 mod config;
 mod connection;
-mod hooks;
 mod manager;
-mod ping;
-mod types;
 
 pub use config::Config;
-pub use hooks::HookType;
-pub use manager::WSManager;
+pub use connection::ConnectionMessage;
+pub use manager::Manager;
 
 #[cfg(test)]
 mod test {
-    use std::sync::Arc;
+    use std::time::Duration;
 
-    use futures_util::StreamExt;
-    use tokio::io::ErrorKind;
-    use tokio::sync::Mutex;
-    use tokio_test::io::Mock;
-    use tokio_tungstenite::WebSocketStream;
-
-    use crate::{Config, WSManager, connection::Connection, hooks::ReadHooks};
+    use crate::{Config, ConnectionMessage, Manager};
     use tokio_tungstenite::tungstenite::Message;
 
-    async fn setup(mock: Mock) -> Connection<Mock> {
-        let ws_stream = WebSocketStream::from_raw_socket(
-            mock,
-            tokio_tungstenite::tungstenite::protocol::Role::Server,
-            None,
-        )
-        .await;
-
-        let write_on_init = Vec::new();
-        let config = Config {
+    fn create_test_config(name: &str, url: &str) -> Config {
+        Config {
+            name: name.to_string(),
             ping_duration: 10,
             ping_message: "ping".to_string(),
             ping_timeout: 15,
-            url: "wss://fake".to_string(),
+            url: url.to_string(),
             reconnect_timeout: 10,
-            write_on_init,
-            connection_init_delay_ms: None,
-        };
-
-        let (sink, stream) = ws_stream.split();
-
-        let hooks = ReadHooks::new();
-
-        let mut conn = Connection::new(config, hooks);
-        conn.write = Some(Arc::new(Mutex::new(sink)));
-        conn.read = Some(Arc::new(Mutex::new(stream)));
-        conn
-    }
-
-    #[tokio::test]
-    async fn read_error_returns_connection_error() {
-        let mock = tokio_test::io::Builder::new()
-            .read_error(std::io::Error::new(
-                ErrorKind::ConnectionAborted,
-                "Server connection lost",
-            ))
-            .build();
-
-        let mut conn = setup(mock).await;
-
-        let read_handle = conn.read_loop().await.unwrap();
-        let res: (Result<Result<(), anyhow::Error>, tokio::task::JoinError>,) =
-            tokio::join!(read_handle);
-
-        assert!(res.0.unwrap().is_err());
-    }
-
-    #[tokio::test]
-    async fn concurrent_new_conn_operations() {
-        let manager = WSManager::new();
-        let mut handles = vec![];
-
-        for i in 0..100 {
-            let mut manager_clone = manager.clone();
-            let handle = tokio::spawn(async move {
-                let config = Config {
-                    ping_duration: 10,
-                    ping_message: "ping".to_string(),
-                    ping_timeout: 15,
-                    url: format!("wss://fake{}.com", i),
-                    reconnect_timeout: 10,
-                    write_on_init: Vec::new(),
-                    connection_init_delay_ms: None,
-                };
-                manager_clone.new_conn(&format!("conn_{}", i), config).await;
-            });
-            handles.push(handle);
-        }
-
-        // Wait for all tasks to complete
-        for handle in handles {
-            handle.await.unwrap();
-        }
-
-        // Verify all connections were added
-        assert_eq!(manager.conn.len(), 100);
-        for i in 0..100 {
-            assert!(manager.conn.contains_key(&format!("conn_{}", i)));
         }
     }
 
     #[tokio::test]
-    async fn concurrent_write_to_different_connections() {
-        // This test verifies that DashMap allows concurrent writes to different connections without blocking
-        let mut manager = WSManager::new();
+    async fn manager_creates_connections() {
+        let manager = Manager::new();
+        let config = create_test_config("test", "wss://echo.websocket.org");
 
-        for i in 0..10 {
-            let config = Config {
-                ping_duration: 10,
-                ping_message: "ping".to_string(),
-                ping_timeout: 15,
-                url: format!("wss://fake{}.com", i),
-                reconnect_timeout: 10,
-                write_on_init: Vec::new(),
-                connection_init_delay_ms: None,
-            };
-            manager.new_conn(&format!("conn_{}", i), config).await;
-        }
-
-        let mut handles = vec![];
-        for i in 0..10 {
-            let manager_clone = manager.clone();
-            let handle =
-                tokio::spawn(
-                    async move { manager_clone.conn.contains_key(&format!("conn_{}", i)) },
-                );
-            handles.push(handle);
-        }
-
-        for handle in handles {
-            let result = handle.await.unwrap();
-            assert!(result);
-        }
+        manager.new_conn("test", config).await;
+        manager.close_conn("test").await;
     }
 
     #[tokio::test]
-    async fn uninitialized_connection_write_returns_error() {
-        // This test verifies that calling write on an uninitialized connection returns proper error
-        let config = Config {
-            ping_duration: 10,
-            ping_message: "ping".to_string(),
-            ping_timeout: 15,
-            url: "wss://fake".to_string(),
-            reconnect_timeout: 10,
-            write_on_init: Vec::new(),
-            connection_init_delay_ms: None,
-        };
+    async fn manager_handles_write_to_nonexistent_connection() {
+        let manager = Manager::new();
 
-        let hooks = ReadHooks::new();
-        let mut conn: Connection<Mock> = Connection::new(config, hooks);
+        let message =
+            ConnectionMessage::Message("nonexistent".to_string(), Message::Text("test".into()));
+        manager.write("nonexistent", message).await;
+    }
 
-        let result = conn.write(Message::Text("test".into())).await;
+    #[tokio::test]
+    async fn manager_read_channel_works() {
+        let manager = Manager::new();
+        let mut receiver = manager.read();
+
+        let result = tokio::time::timeout(Duration::from_millis(100), receiver.recv()).await;
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Connection write stream not initialized")
-        );
     }
 
     #[tokio::test]
-    async fn uninitialized_connection_ping_loop_returns_error() {
-        // This test verifies that calling ping_loop on an uninitialized connection returns proper error
-        let config = Config {
-            ping_duration: 10,
-            ping_message: "ping".to_string(),
-            ping_timeout: 15,
-            url: "wss://fake".to_string(),
-            reconnect_timeout: 10,
-            write_on_init: Vec::new(),
-            connection_init_delay_ms: None,
-        };
+    async fn manager_close_conn_works() {
+        let manager = Manager::new();
 
-        let hooks = ReadHooks::new();
-        let mut conn: Connection<Mock> = Connection::new(config, hooks);
-
-        let result = conn.ping_loop().await;
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Connection write stream not initialized for ping loop")
-        );
+        manager.close_conn("nonexistent").await;
     }
 
     #[tokio::test]
-    async fn uninitialized_connection_read_loop_returns_error() {
-        // This test verifies that calling read_loop on an uninitialized connection returns proper error
-        let config = Config {
-            ping_duration: 10,
-            ping_message: "ping".to_string(),
-            ping_timeout: 15,
-            url: "wss://fake".to_string(),
-            reconnect_timeout: 10,
-            write_on_init: Vec::new(),
-            connection_init_delay_ms: None,
-        };
+    async fn config_creation_works() {
+        let config = create_test_config("test", "wss://example.com");
 
-        let hooks = ReadHooks::new();
-        let mut conn: Connection<Mock> = Connection::new(config, hooks);
-
-        let result = conn.read_loop().await;
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Connection read stream not initialized for read loop")
-        );
+        assert_eq!(config.name, "test");
+        assert_eq!(config.url, "wss://example.com");
+        assert_eq!(config.ping_duration, 10);
+        assert_eq!(config.ping_timeout, 15);
+        assert_eq!(config.reconnect_timeout, 10);
     }
 
     #[tokio::test]
-    async fn no_deadlock_during_start_and_write() {
-        // This test verifies that DashMap doesn't cause deadlocks when start() is iterating
-        // while other operations try to access the map
-        use tokio::time::{Duration, timeout};
+    async fn connection_message_variants_work() {
+        let msg1 = ConnectionMessage::Message("test".to_string(), Message::Text("hello".into()));
+        let msg2 = ConnectionMessage::ReadError("test".to_string());
+        let msg3 = ConnectionMessage::WriteError("test".to_string());
+        let msg4 = ConnectionMessage::PongReceiveTimeoutError("test".to_string());
 
-        let mut manager = WSManager::new();
-
-        for i in 0..5 {
-            let config = Config {
-                ping_duration: 10,
-                ping_message: "ping".to_string(),
-                ping_timeout: 15,
-                url: format!("wss://fake{}.com", i),
-                reconnect_timeout: 10,
-                write_on_init: Vec::new(),
-                connection_init_delay_ms: None,
-            };
-            manager.new_conn(&format!("conn_{}", i), config).await;
+        match msg1 {
+            ConnectionMessage::Message(name, _) => assert_eq!(name, "test"),
+            _ => panic!("Expected Message variant"),
         }
 
-        let manager_clone1 = manager.clone();
-        let mut manager_clone2 = manager.clone();
+        match msg2 {
+            ConnectionMessage::ReadError(name) => assert_eq!(name, "test"),
+            _ => panic!("Expected ReadError variant"),
+        }
 
-        let iterate_task = tokio::spawn(async move {
-            for _ in 0..100 {
-                for entry in &*manager_clone1.conn {
-                    let _name = entry.key();
-                    let _conn = entry.value();
-                    tokio::time::sleep(Duration::from_micros(10)).await;
-                }
-            }
-        });
+        match msg3 {
+            ConnectionMessage::WriteError(name) => assert_eq!(name, "test"),
+            _ => panic!("Expected WriteError variant"),
+        }
 
-        let write_task = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(1)).await;
+        match msg4 {
+            ConnectionMessage::PongReceiveTimeoutError(name) => assert_eq!(name, "test"),
+            _ => panic!("Expected PongReceiveTimeoutError variant"),
+        }
+    }
 
-            for i in 5..10 {
-                let config = Config {
-                    ping_duration: 10,
-                    ping_message: "ping".to_string(),
-                    ping_timeout: 15,
-                    url: format!("wss://fake{}.com", i),
-                    reconnect_timeout: 10,
-                    write_on_init: Vec::new(),
-                    connection_init_delay_ms: None,
-                };
-                manager_clone2
-                    .new_conn(&format!("conn_{}", i), config)
-                    .await;
-            }
-            5
-        });
+    #[tokio::test]
+    async fn manager_reconnect_nonexistent_connection() {
+        let manager = Manager::new();
 
-        let result = timeout(Duration::from_secs(5), async {
-            let (r1, r2) = tokio::join!(iterate_task, write_task);
-            (r1, r2)
-        })
-        .await;
+        let result = manager.reconnect("nonexistent").await;
+        assert!(result.is_err());
 
-        assert!(result.is_ok(), "Operations timed out - possible deadlock!");
-
-        let (iterate_result, write_result) = result.unwrap();
-        assert!(iterate_result.is_ok());
-        assert_eq!(write_result.unwrap(), 5);
-
-        assert_eq!(manager.conn.len(), 10);
+        let error_msg = result.unwrap_err().to_string();
+        assert!(error_msg.contains("Connection 'nonexistent' not found for reconnect"));
     }
 }
