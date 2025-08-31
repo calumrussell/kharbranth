@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use anyhow::Result;
 use dashmap::DashMap;
@@ -14,7 +14,6 @@ pub struct Manager {
     conn: DashMap<String, Connection>,
     write_sends: DashMap<String, Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>>,
     global_send: Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>,
-    read_tracker: DashMap<String, u64>,
     cancel_tokens: DashMap<String, CancellationToken>,
 }
 
@@ -33,7 +32,6 @@ impl Manager {
             conn: DashMap::new(),
             write_sends: DashMap::new(),
             global_send: Arc::new(global_send),
-            read_tracker: DashMap::new(),
             cancel_tokens: DashMap::new(),
         }
     }
@@ -62,45 +60,8 @@ impl Manager {
 
         self.write_sends.remove(&name.to_string());
         self.conn.remove(&name.to_string());
-        self.read_tracker.remove(&name.to_string());
         self.cancel_tokens.remove(&name.to_string());
     }
-
-    pub async fn read_timeout_loop(&self) {
-        let mut global_recv = self.global_send.subscribe();
-        let mut interval = tokio::time::interval(Duration::from_secs(10));
-        let mut previous_bytes = HashMap::new();
-
-        loop {
-            tokio::select! {
-                msg_result = global_recv.recv() => {
-                    if let Ok(ConnectionMessage::Message(conn_name, msg_content)) = msg_result {
-                        let bytes_to_add = msg_content.len() as u64;
-                        self.read_tracker
-                            .entry(conn_name)
-                            .and_modify(|bytes| *bytes += bytes_to_add)
-                            .or_insert(bytes_to_add);
-                    }
-                }
-                _ = interval.tick() => {
-                    let current_state: HashMap<String, u64> = self.read_tracker
-                        .iter()
-                        .map(|entry| (entry.key().clone(), *entry.value()))
-                        .collect();
-
-                    for (conn_name, current_bytes) in &current_state {
-                        if let Some(prev_bytes) = previous_bytes.get(conn_name)
-                            && current_bytes == prev_bytes {
-                                self.close_conn(conn_name).await;
-                            }
-                    }
-
-                    previous_bytes = current_state;
-                }
-            }
-        }
-    }
-
 
     pub async fn new_conn(&self, name: &str, config: Config) -> Result<()> {
         let global_send = Arc::clone(&self.global_send);

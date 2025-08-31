@@ -37,13 +37,10 @@ async fn main() -> Result<()> {
         }
     });
 
-    let cloned_manager = Arc::clone(&manager);
-    tokio::spawn(async move {
-        cloned_manager.read_timeout_loop().await;
-    });
 
     sleep(Duration::from_secs(2)).await;
 
+    /*
     let test = r#"{
       "event": "subscribe",
       "product_ids": ["PF_SOLUSD", "PF_XBTUSD", "PF_ETHUSD"],
@@ -52,6 +49,7 @@ async fn main() -> Result<()> {
 
     let test_msg = ConnectionMessage::Message("test".to_string(), Message::Text(test.into()));
     manager.write("test", test_msg).await;
+    */
 
     // Let it run for a bit to see messages
     sleep(Duration::from_secs(30)).await;
