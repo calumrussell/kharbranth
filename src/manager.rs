@@ -74,17 +74,12 @@ impl Manager {
         loop {
             tokio::select! {
                 msg_result = global_recv.recv() => {
-                    if let Ok(msg) = msg_result {
-                        match msg {
-                            ConnectionMessage::Message(conn_name, msg_content) => {
-                                let bytes_to_add = msg_content.len() as u64;
-                                self.read_tracker
-                                    .entry(conn_name)
-                                    .and_modify(|bytes| *bytes += bytes_to_add)
-                                    .or_insert(bytes_to_add);
-                            },
-                            _ => (),
-                        }
+                    if let Ok(ConnectionMessage::Message(conn_name, msg_content)) = msg_result {
+                        let bytes_to_add = msg_content.len() as u64;
+                        self.read_tracker
+                            .entry(conn_name)
+                            .and_modify(|bytes| *bytes += bytes_to_add)
+                            .or_insert(bytes_to_add);
                     }
                 }
                 _ = interval.tick() => {
@@ -138,19 +133,10 @@ impl Manager {
         let mut global_recv = self.global_send.subscribe();
 
         loop {
-            if let Ok(msg) = global_recv.recv().await {
-                match msg {
-                    ConnectionMessage::Message(name, msg) => match msg {
-                        Message::Ping(val) => {
-                            if let Some(conn_writer) = self.write_sends.get(&name) {
-                                let _ = conn_writer
-                                    .send(ConnectionMessage::Message(name, Message::Pong(val)));
-                            }
-                        }
-                        _ => {}
-                    },
-                    _ => {}
-                }
+            if let Ok(ConnectionMessage::Message(name, Message::Ping(val))) = global_recv.recv().await
+                && let Some(conn_writer) = self.write_sends.get(&name) {
+                let _ = conn_writer
+                    .send(ConnectionMessage::Message(name, Message::Pong(val)));
             }
         }
     }

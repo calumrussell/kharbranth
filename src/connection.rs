@@ -151,22 +151,17 @@ impl PingActor {
                 },
                 _ = ping_timeout.tick() => {
                     let now = Local::now().timestamp();
-                    if let Some(last_pong) = self.last_pong_time {
-                        if now - last_pong > self.config.ping_timeout as i64 {
-                            let _ = self.writer_send.send(ConnectionMessage::PongReceiveTimeoutError(self.name.clone()));
-                        }
+                    if let Some(last_pong) = self.last_pong_time
+                        && now - last_pong > self.config.ping_timeout as i64 {
+                        let _ = self.writer_send.send(ConnectionMessage::PongReceiveTimeoutError(self.name.clone()));
                     }
                 },
                 _ = cancel_token.cancelled() => break,
                 msg_result = self.global_recv.recv() => {
-                    if let Ok(msg) = msg_result {
-                        if let ConnectionMessage::Message(conn_name, conn_msg) = msg {
-                            if conn_name == self.name {
-                                if let Message::Pong(_val) = conn_msg {
-                                    self.last_pong_time = Some(Local::now().timestamp());
-                                }
-                            }
-                        }
+                    if let Ok(ConnectionMessage::Message(conn_name, conn_msg)) = msg_result
+                        && conn_name == self.name
+                        && let Message::Pong(_val) = conn_msg {
+                        self.last_pong_time = Some(Local::now().timestamp());
                     }
                 }
             }
@@ -236,15 +231,11 @@ impl WriteActor {
     }
 
     async fn handle_message(&mut self, msg: ConnectionMessage) {
-        match msg {
-            ConnectionMessage::Message(_name, msg) => {
-                if let Err(_) = self.writer.send(msg).await {
-                    let _ = self
-                        .global_send
-                        .send(ConnectionMessage::WriteError(self.name.clone()));
-                }
-            }
-            _ => (),
+        if let ConnectionMessage::Message(_name, msg) = msg
+            && (self.writer.send(msg).await).is_err() {
+            let _ = self
+                .global_send
+                .send(ConnectionMessage::WriteError(self.name.clone()));
         }
     }
 
