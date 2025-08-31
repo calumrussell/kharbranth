@@ -6,7 +6,7 @@ use futures_util::{
     SinkExt, StreamExt,
     stream::{SplitSink, SplitStream},
 };
-use log::debug;
+use log::{debug, error};
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
     WebSocketStream, connect_async,
@@ -18,32 +18,12 @@ use crate::config::Config;
 
 #[derive(Debug)]
 pub enum ConnectionError {
-    PingFailed(String),
-    CloseFrameReceived,
-    PongReceiveTimeout,
-    ReadError(String),
-    ConnectionDropped,
-    WriteError(String),
-    ConnectionNotFound(String),
     ConnectionInitFailed(String),
 }
 
 impl std::fmt::Display for ConnectionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ConnectionError::PingFailed(msg) => write!(f, "Ping Failed: {:?}", msg),
-            ConnectionError::CloseFrameReceived => write!(f, "Close Frame Received"),
-            ConnectionError::PongReceiveTimeout => write!(f, "Timed out waiting for Pong"),
-            ConnectionError::ReadError(msg) => {
-                write!(f, "Read error when calling .next(): {:?}", msg)
-            }
-            ConnectionError::ConnectionDropped => write!(f, "Connection dropped"),
-            ConnectionError::WriteError(msg) => {
-                write!(f, "Write error when calling .send(): {:?}", msg)
-            }
-            ConnectionError::ConnectionNotFound(name) => {
-                write!(f, "Connection not found: {:?}", name)
-            }
             ConnectionError::ConnectionInitFailed(msg) => {
                 write!(f, "Connection initialization failed: {:?}", msg)
             }
@@ -137,15 +117,17 @@ impl PingActor {
     }
 
     async fn run(&mut self, cancel_token: CancellationToken) {
-        let mut ping_duration = tokio::time::interval(Duration::from_secs(self.config.ping_duration));
+        let mut ping_duration =
+            tokio::time::interval(Duration::from_secs(self.config.ping_duration));
         let mut ping_timeout = tokio::time::interval(Duration::from_secs(self.config.ping_timeout));
-        let ping_msg_bytes: tokio_tungstenite::tungstenite::Bytes = self.config.ping_message.clone().into();
+        let ping_msg_bytes: tokio_tungstenite::tungstenite::Bytes =
+            self.config.ping_message.clone().into();
 
         loop {
             tokio::select! {
                 _ = ping_duration.tick() => {
                     let _ = self.writer_send.send(ConnectionMessage::Message(
-                        self.name.clone(), 
+                        self.name.clone(),
                         Message::Ping(ping_msg_bytes.clone())
                     ));
                 },
@@ -232,7 +214,8 @@ impl WriteActor {
 
     async fn handle_message(&mut self, msg: ConnectionMessage) {
         if let ConnectionMessage::Message(_name, msg) = msg
-            && (self.writer.send(msg).await).is_err() {
+            && (self.writer.send(msg).await).is_err()
+        {
             let _ = self
                 .global_send
                 .send(ConnectionMessage::WriteError(self.name.clone()));
@@ -299,11 +282,16 @@ impl Connection {
         global_send: Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>,
         cancel_token: CancellationToken,
     ) -> Result<Self> {
-        let request = config
-            .url
-            .clone()
-            .into_client_request()
-            .map_err(|e| anyhow!("Invalid WebSocket URL '{}': {}", config.url, e))?;
+        let request = match config.url.clone().into_client_request() {
+            Ok(req) => req,
+            Err(e) => {
+                error!("Invalid WebSocket URL '{}': {}", config.url, e);
+                return Err(anyhow!(ConnectionError::ConnectionInitFailed(format!(
+                    "Invalid URL: {}",
+                    e
+                ))));
+            }
+        };
 
         match connect_async(request).await {
             Ok((conn, response)) => {
@@ -339,9 +327,12 @@ impl Connection {
                     cancel_token,
                 })
             }
-            Err(e) => Err(anyhow!(ConnectionError::ConnectionInitFailed(
-                e.to_string()
-            ))),
+            Err(e) => {
+                error!("Failed to connect to '{}': {}", config.url, e);
+                Err(anyhow!(ConnectionError::ConnectionInitFailed(
+                    e.to_string()
+                )))
+            }
         }
     }
 }

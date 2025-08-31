@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 use anyhow::Result;
 use kharbranth::{Config, ConnectionMessage, Manager};
@@ -26,7 +26,7 @@ async fn main() -> Result<()> {
     env_logger::init();
     info!("Starting Hyperliquid WebSocket test");
 
-    let manager = Arc::new(Manager::new());
+    let manager = Manager::new();
 
     let subscription = HyperliquidSubscriptionMessage {
         typ: "candle".to_string(),
@@ -50,7 +50,7 @@ async fn main() -> Result<()> {
         reconnect_timeout: 5,
     };
 
-    manager.new_conn("hyperliquid", config).await?;
+    manager.new_conn("hyperliquid", config).await;
 
     let mut read_channel = manager.read();
     tokio::spawn(async move {
@@ -70,8 +70,6 @@ async fn main() -> Result<()> {
     });
 
     sleep(Duration::from_secs(2)).await;
-
-    // Send subscription message
     let subscription_msg = ConnectionMessage::Message(
         "hyperliquid".to_string(),
         Message::Text(subscribe_json.into()),

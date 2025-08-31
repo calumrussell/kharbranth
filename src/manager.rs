@@ -1,7 +1,15 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use anyhow::Result;
 use dashmap::DashMap;
+use log::error;
+use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 
@@ -15,38 +23,59 @@ pub struct Manager {
     write_sends: DashMap<String, Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>>,
     global_send: Arc<tokio::sync::broadcast::Sender<ConnectionMessage>>,
     cancel_tokens: DashMap<String, CancellationToken>,
-}
-
-impl Default for Manager {
-    fn default() -> Self {
-        Self::new()
-    }
+    loops_started: AtomicBool,
+    pong_handle: OnceLock<JoinHandle<()>>,
+    error_handle: OnceLock<JoinHandle<()>>,
 }
 
 impl Manager {
-    pub fn new() -> Self {
+    pub fn new() -> Arc<Self> {
         let (global_send, _global_recv) =
             tokio::sync::broadcast::channel::<ConnectionMessage>(1_028);
 
-        Self {
+        Arc::new(Self {
             conn: DashMap::new(),
             write_sends: DashMap::new(),
             global_send: Arc::new(global_send),
             cancel_tokens: DashMap::new(),
+            loops_started: AtomicBool::new(false),
+            pong_handle: OnceLock::new(),
+            error_handle: OnceLock::new(),
+        })
+    }
+
+    fn ensure_loops_started(self: &Arc<Self>) {
+        if self
+            .loops_started
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            let manager_clone1 = Arc::clone(self);
+            let _pong_handle = tokio::spawn(async move {
+                manager_clone1.pong_loop().await;
+            });
+
+            let manager_clone2 = Arc::clone(self);
+            let _error_handle = tokio::spawn(async move {
+                manager_clone2.error_handling_loop().await;
+            });
+
+            let _ = self.pong_handle.set(_pong_handle);
+            let _ = self.error_handle.set(_error_handle);
         }
     }
 
-    pub fn read(&self) -> tokio::sync::broadcast::Receiver<ConnectionMessage> {
+    pub fn read(self: &Arc<Self>) -> tokio::sync::broadcast::Receiver<ConnectionMessage> {
         self.global_send.subscribe()
     }
 
-    pub async fn write(&self, name: &str, message: ConnectionMessage) {
+    pub async fn write(self: &Arc<Self>, name: &str, message: ConnectionMessage) {
         if let Some(sender) = self.write_sends.get(name) {
             let _ = sender.send(message);
         }
     }
 
-    pub async fn close_conn(&self, name: &str) {
+    pub async fn close_conn(self: &Arc<Self>, name: &str) {
         if let Some(writer) = self.write_sends.get(name) {
             let _ = writer.send(ConnectionMessage::Message(
                 name.to_string(),
@@ -63,19 +92,26 @@ impl Manager {
         self.cancel_tokens.remove(&name.to_string());
     }
 
-    pub async fn new_conn(&self, name: &str, config: Config) -> Result<()> {
+    pub async fn new_conn(self: &Arc<Self>, name: &str, config: Config) {
+        self.ensure_loops_started();
         let global_send = Arc::clone(&self.global_send);
         let cancel_token = CancellationToken::new();
-        let wrapper = Connection::new(name, config.clone(), global_send, cancel_token.clone()).await?;
 
-        let writer_send_arc = Arc::clone(&wrapper.writer.sender);
-        self.conn.insert(name.to_string(), wrapper);
-        self.write_sends.insert(name.to_string(), writer_send_arc);
-        self.cancel_tokens.insert(name.to_string(), cancel_token.clone());
-        Ok(())
+        match Connection::new(name, config.clone(), global_send, cancel_token.clone()).await {
+            Ok(wrapper) => {
+                let writer_send_arc = Arc::clone(&wrapper.writer.sender);
+                self.conn.insert(name.to_string(), wrapper);
+                self.write_sends.insert(name.to_string(), writer_send_arc);
+                self.cancel_tokens
+                    .insert(name.to_string(), cancel_token.clone());
+            }
+            Err(e) => {
+                error!("Failed to create connection '{}': {}", name, e);
+            }
+        }
     }
 
-    pub async fn reconnect(&self, name: &str) -> Result<()> {
+    pub async fn reconnect(self: &Arc<Self>, name: &str) -> Result<()> {
         let config = if let Some(conn) = self.conn.get(name) {
             conn.config.clone()
         } else {
@@ -87,22 +123,25 @@ impl Manager {
 
         self.close_conn(name).await;
         tokio::time::sleep(Duration::from_secs(config.reconnect_timeout)).await;
-        self.new_conn(name, config).await
+
+        self.new_conn(name, config).await;
+        Ok(())
     }
 
-    pub async fn pong_loop(&self) {
+    pub async fn pong_loop(self: &Arc<Self>) {
         let mut global_recv = self.global_send.subscribe();
 
         loop {
-            if let Ok(ConnectionMessage::Message(name, Message::Ping(val))) = global_recv.recv().await
-                && let Some(conn_writer) = self.write_sends.get(&name) {
-                let _ = conn_writer
-                    .send(ConnectionMessage::Message(name, Message::Pong(val)));
+            if let Ok(ConnectionMessage::Message(name, Message::Ping(val))) =
+                global_recv.recv().await
+                && let Some(conn_writer) = self.write_sends.get(&name)
+            {
+                let _ = conn_writer.send(ConnectionMessage::Message(name, Message::Pong(val)));
             }
         }
     }
 
-    pub async fn error_handling_loop(&self) {
+    pub async fn error_handling_loop(self: &Arc<Self>) {
         let mut global_recv = self.global_send.subscribe();
 
         loop {
@@ -129,14 +168,18 @@ impl Drop for Manager {
         for token in self.cancel_tokens.iter() {
             token.cancel();
         }
-        
+
         for entry in self.write_sends.iter() {
             let name = entry.key().clone();
             let sender = entry.value();
-            let _ = sender.send(ConnectionMessage::Message(
-                name,
-                Message::Close(None)
-            ));
+            let _ = sender.send(ConnectionMessage::Message(name, Message::Close(None)));
+        }
+
+        if let Some(pong_handle) = self.pong_handle.get() {
+            pong_handle.abort();
+        }
+        if let Some(error_handle) = self.error_handle.get() {
+            error_handle.abort();
         }
     }
 }
