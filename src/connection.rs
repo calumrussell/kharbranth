@@ -266,8 +266,9 @@ impl WriteActorHandle {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct Connection {
-    name: String,
+    pub name: String,
     pub writer: WriteActorHandle,
     pub reader: ReadActorHandle,
     pub ping: PingActorHandle,

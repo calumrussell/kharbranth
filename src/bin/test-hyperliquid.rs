@@ -55,16 +55,12 @@ async fn main() -> Result<()> {
     let mut read_channel = manager.read();
     tokio::spawn(async move {
         while let Ok(msg) = read_channel.recv().await {
-            match msg {
-                ConnectionMessage::Message(conn_name, message) => {
-                    info!("Received from {}: {:?}", conn_name, message);
-                    if let Message::Text(text) = message {
-                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
-                            info!("Parsed JSON: {}", parsed);
-                        }
-                    }
+            if let ConnectionMessage::Message(conn_name, message) = msg {
+                info!("Received from {}: {:?}", conn_name, message);
+                if let Message::Text(text) = message
+                    && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
+                    info!("Parsed JSON: {}", parsed);
                 }
-                _ => (),
             }
         }
     });
