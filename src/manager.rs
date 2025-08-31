@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use anyhow::Result;
 use chrono::Local;
 use dashmap::DashMap;
-use tokio_tungstenite::tungstenite::{Message, Utf8Bytes};
+use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -119,6 +119,16 @@ impl Manager {
                         let _ = writer.send(ConnectionMessage::Message(name.to_string(), Message::Ping(ping_msg_bytes.clone())));
                     }
                 },
+                _ = ping_timeout.tick() => {
+                    let now = Local::now().timestamp();
+                    if let Some(last_pong) = self.pong_tracker.get(name) {
+                        if *last_pong - now > config.ping_timeout as i64 {
+                            if let Some(writer) = self.write_sends.get(name) {
+                                let _ = writer.send(ConnectionMessage::PongReceiveTimeoutError(name.to_string()));
+                            }
+                        }
+                    }
+                },
                 _ = cancel_token.cancelled() => break,
                 msg_result = global_recv.recv() => {
                     if let Ok(msg) = msg_result {
@@ -140,11 +150,13 @@ impl Manager {
 
     pub async fn new_conn(&self, name: &str, config: Config) -> Result<()> {
         let global_send = Arc::clone(&self.global_send);
-        let wrapper = Connection::new(name, config, global_send).await?;
+        let wrapper = Connection::new(name, config.clone(), global_send).await?;
 
         let writer_send_arc = Arc::clone(&wrapper.writer.sender);
         self.conn.insert(name.to_string(), wrapper);
         self.write_sends.insert(name.to_string(), writer_send_arc);
+        let cancel_token = CancellationToken::new();
+        tokio::spawn(self.ping_loop(name, config, cancel_token));
         Ok(())
     }
 
@@ -159,9 +171,7 @@ impl Manager {
         };
 
         self.close_conn(name).await;
-
         tokio::time::sleep(Duration::from_secs(config.reconnect_timeout)).await;
-
         self.new_conn(name, config).await
     }
 
@@ -196,6 +206,9 @@ impl Manager {
                         let _ = self.reconnect(&conn_name).await;
                     }
                     ConnectionMessage::WriteError(conn_name) => {
+                        let _ = self.reconnect(&conn_name).await;
+                    }
+                    ConnectionMessage::PongReceiveTimeoutError(conn_name) => {
                         let _ = self.reconnect(&conn_name).await;
                     }
                     _ => {}

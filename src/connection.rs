@@ -57,6 +57,7 @@ pub enum ConnectionMessage {
     Message(String, Message),
     ReadError(String),
     WriteError(String),
+    PongReceiveTimeoutError(String),
 }
 
 type Reader = SplitStream<WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>>;
