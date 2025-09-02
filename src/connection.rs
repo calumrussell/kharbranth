@@ -259,11 +259,14 @@ impl WriteActor {
         loop {
             tokio::select! {
                 msg_recv = self.read.recv() => {
+                    println!("Write Actor Recv: {:?}", msg_recv);
+
                     match msg_recv {
                         Ok(msg) => {
                             self.handle_message(msg).await;
                         },
-                        Err(_e) => {
+                        Err(e) => {
+                            error!("WriteActor for '{}' exiting due to recv error: {:?}", self.name, e);
                             break;
                         }
                     }
