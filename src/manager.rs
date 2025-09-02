@@ -81,6 +81,7 @@ impl Manager {
     pub async fn write(self: &Arc<Self>, name: &str, message: Message) {
         println!("Write called: {:?}, {:?}", name, message);
         if let Some(sender) = self.write_sends.get(name) {
+            println!("Through the lock");
             let _ = sender.send(message);
         }
     }
