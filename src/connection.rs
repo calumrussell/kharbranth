@@ -148,16 +148,18 @@ impl PingActor {
                 },
                 _ = ping_timeout.tick() => {
                     let now = Local::now().timestamp();
-                    if let Some(last_pong) = self.last_pong_time
-                        && now - last_pong > self.config.ping_timeout as i64 {
-                        let _ = self.writer_send.send(Message::PongReceiveTimeoutError(self.name.clone()));
+                    if let Some(last_pong) = self.last_pong_time {
+                        if now - last_pong > self.config.ping_timeout as i64 {
+                            let _ = self.writer_send.send(Message::PongReceiveTimeoutError(self.name.clone()));
+                        }
                     }
                 },
                 _ = cancel_token.cancelled() => break,
                 msg_result = self.global_recv.recv() => {
-                    if let Ok(Message::PongMessage(conn_name, _val)) = msg_result
-                        && conn_name == self.name {
-                        self.last_pong_time = Some(Local::now().timestamp());
+                    if let Ok(Message::PongMessage(conn_name, _val)) = msg_result {
+                        if conn_name == self.name {
+                            self.last_pong_time = Some(Local::now().timestamp());
+                        }
                     }
                 }
             }

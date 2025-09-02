@@ -109,6 +109,8 @@ impl Manager {
                 self.write_sends.insert(name.to_string(), writer_send_arc);
                 self.cancel_tokens
                     .insert(name.to_string(), cancel_token.clone());
+
+                //TODO: connection created message should trigger subscriptions
             }
             Err(e) => {
                 error!("Failed to create connection '{}': {}", name, e);
@@ -117,13 +119,14 @@ impl Manager {
     }
 
     pub async fn reconnect(self: &Arc<Self>, name: &str) -> Result<()> {
-        let config = if let Some(conn) = self.conn.get(name) {
-            conn.config.clone()
-        } else {
-            return Err(anyhow::anyhow!(
-                "Connection '{}' not found for reconnect",
-                name
-            ));
+        let config = match self.conn.get(name) {
+            Some(conn) => conn.config.clone(),
+            None => {
+                return Err(anyhow::anyhow!(
+                    "Connection '{}' not found for reconnect",
+                    name
+                ));
+            }
         };
 
         self.close_conn(name).await;
