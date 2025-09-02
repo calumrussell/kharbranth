@@ -11,6 +11,10 @@ path = "src/lib.rs"
 name = "test-hyperliquid"
 path = "src/bin/test-hyperliquid.rs"
 
+[[bin]]
+name = "test-kraken"
+path = "src/bin/test-kraken.rs"
+
 [dependencies]
 tokio-tungstenite = { version = "0.26.2", features = ["native-tls"] }
 tokio = { version = "1.45.1", features = ["full"] }

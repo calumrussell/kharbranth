@@ -245,6 +245,8 @@ impl WriteActor {
             _ => return, // Don't handle error messages or frame messages
         };
 
+        println!("Writing: {:?}", tungstenite_msg);
+
         if let Err(e) = self.writer.send(tungstenite_msg).await {
             error!("Write Error for {:?}: {:?}", self.name, e.to_string());
             let _ = self
