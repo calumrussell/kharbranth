@@ -111,7 +111,7 @@ pub struct PingActor {
     config: Config,
     writer_send: Arc<tokio::sync::broadcast::Sender<Message>>,
     global_recv: tokio::sync::broadcast::Receiver<Message>,
-    last_pong_time: Option<i64>,
+    pending_ping_time: Option<i64>,
 }
 
 impl PingActor {
@@ -126,39 +126,39 @@ impl PingActor {
             config,
             writer_send,
             global_recv,
-            last_pong_time: None,
+            pending_ping_time: None,
         }
     }
 
     async fn run(&mut self, cancel_token: CancellationToken) {
         let mut ping_duration =
             tokio::time::interval(Duration::from_secs(self.config.ping_duration));
-        let mut ping_timeout = tokio::time::interval(Duration::from_secs(self.config.ping_timeout));
         let ping_msg_bytes: tokio_tungstenite::tungstenite::Bytes =
             self.config.ping_message.clone().into();
 
         loop {
             tokio::select! {
                 _ = ping_duration.tick() => {
+                    let now = Local::now().timestamp();
+                    
+                    if let Some(pending_time) = self.pending_ping_time {
+                        if now - pending_time > self.config.ping_timeout as i64 {
+                            let _ = self.writer_send.send(Message::PongReceiveTimeoutError(self.name.clone()));
+                        }
+                    }
+                    
+                    self.pending_ping_time = Some(now);
                     let ping_text = String::from_utf8_lossy(&ping_msg_bytes).to_string();
                     let _ = self.writer_send.send(Message::PingMessage(
                         self.name.clone(),
                         ping_text
                     ));
                 },
-                _ = ping_timeout.tick() => {
-                    let now = Local::now().timestamp();
-                    if let Some(last_pong) = self.last_pong_time {
-                        if now - last_pong > self.config.ping_timeout as i64 {
-                            let _ = self.writer_send.send(Message::PongReceiveTimeoutError(self.name.clone()));
-                        }
-                    }
-                },
                 _ = cancel_token.cancelled() => break,
                 msg_result = self.global_recv.recv() => {
                     if let Ok(Message::PongMessage(conn_name, _val)) = msg_result {
                         if conn_name == self.name {
-                            self.last_pong_time = Some(Local::now().timestamp());
+                            self.pending_ping_time = None;
                         }
                     }
                 }
