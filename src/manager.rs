@@ -25,6 +25,7 @@ pub enum Message {
     ReadError(String, String),
     WriteError(String, String),
     PongReceiveTimeoutError(String),
+    SuccessfulHandshake(String),
 }
 
 pub struct Manager {
@@ -110,7 +111,7 @@ impl Manager {
                 self.cancel_tokens
                     .insert(name.to_string(), cancel_token.clone());
 
-                //TODO: connection created message should trigger subscriptions
+                let _ = self.global_send.send(Message::SuccessfulHandshake(name.to_string()));
             }
             Err(e) => {
                 error!("Failed to create connection '{}': {}", name, e);
