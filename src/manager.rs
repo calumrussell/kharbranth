@@ -82,7 +82,7 @@ impl Manager {
         println!("Write called: {:?}, {:?}", name, message);
         if let Some(sender) = self.write_sends.get(name) {
             println!("Through the lock");
-            if let Err(e) = sender.try_send(message) {
+            if let Err(e) = sender.value().try_send(message) {
                 println!("Write send failed: {:?}", e);
             }
         }
