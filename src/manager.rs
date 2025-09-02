@@ -142,10 +142,10 @@ impl Manager {
         let mut global_recv = self.global_send.subscribe();
 
         loop {
-            if let Ok(Message::PingMessage(name, val)) = global_recv.recv().await
-                && let Some(conn_writer) = self.write_sends.get(&name)
-            {
-                let _ = conn_writer.send(Message::PongMessage(name, val));
+            if let Ok(Message::PingMessage(name, val)) = global_recv.recv().await {
+                if let Some(conn_writer) = self.write_sends.get(&name) {
+                    let _ = conn_writer.send(Message::PongMessage(name, val));
+                }
             }
         }
     }
