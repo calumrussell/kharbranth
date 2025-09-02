@@ -78,7 +78,7 @@ impl Manager {
         self.global_send.subscribe()
     }
 
-    pub async fn write(self: &Arc<Self>, name: &str, message: Message) {
+    pub fn write(self: &Arc<Self>, name: &str, message: Message) {
         println!("Write called: {:?}, {:?}", name, message);
         if let Some(sender) = self.write_sends.get(name) {
             println!("Through the lock");
