@@ -36,7 +36,7 @@ mod test {
         let manager = Manager::new();
 
         let message = Message::TextMessage("nonexistent".to_string(), "test".to_string());
-        manager.write("nonexistent", message).await;
+        manager.write("nonexistent", message);
     }
 
     #[tokio::test]

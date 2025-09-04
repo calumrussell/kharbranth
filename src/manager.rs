@@ -78,7 +78,7 @@ impl Manager {
         self.global_send.subscribe()
     }
 
-    pub async fn write(self: &Arc<Self>, name: &str, message: Message) {
+    pub fn write(self: &Arc<Self>, name: &str, message: Message) {
         if let Some(sender) = self.write_sends.get(name) {
             let _ = sender.send(message);
         }

@@ -60,13 +60,13 @@ async fn main() -> Result<()> {
 
     sleep(Duration::from_secs(2)).await;
     let subscription_msg = Message::TextMessage("hyperliquid".to_string(), subscribe_json);
-    manager.write("hyperliquid", subscription_msg.clone()).await;
+    manager.write("hyperliquid", subscription_msg.clone());
 
     sleep(Duration::from_secs(5)).await;
 
     info!("Trigger reconnect");
     let _ = manager.reconnect("hyperliquid").await;
-    manager.write("hyperliquid", subscription_msg).await;
+    manager.write("hyperliquid", subscription_msg);
 
     sleep(Duration::from_secs(20)).await;
 
