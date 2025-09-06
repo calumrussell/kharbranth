@@ -1,3 +1,5 @@
+#![allow(clippy::collapsible_if)]
+
 mod config;
 mod connection;
 mod manager;
