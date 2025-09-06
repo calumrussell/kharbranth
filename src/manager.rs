@@ -33,21 +33,21 @@ pub enum Message {
 
 #[derive(Debug)]
 pub enum ManagerError {
-    ConnectionUnknown(String),
-    ConnectionInactive(String),
-    ConnectionRestarting(String),
+    Unknown(String),
+    Inactive(String),
+    Restarting(String),
 }
 
 impl std::fmt::Display for ManagerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ManagerError::ConnectionUnknown(conn) => {
+            ManagerError::Unknown(conn) => {
                 write!(f, "Connection Unknown: {:?}", conn)
             }
-            ManagerError::ConnectionInactive(conn) => {
+            ManagerError::Inactive(conn) => {
                 write!(f, "Connection Inactive: {:?}", conn)
             }
-            ManagerError::ConnectionRestarting(conn) => {
+            ManagerError::Restarting(conn) => {
                 write!(f, "Connection Restarting: {:?}", conn)
             }
         }
@@ -106,15 +106,13 @@ impl Manager {
                 let _ = writer.send(message);
                 return Ok(());
             }
-            return Err(anyhow!(ManagerError::ConnectionInactive(name.to_string())));
+            return Err(anyhow!(ManagerError::Inactive(name.to_string())));
         }
-        Err(anyhow!(ManagerError::ConnectionUnknown(name.to_string())))
+        Err(anyhow!(ManagerError::Unknown(name.to_string())))
     }
 
     pub fn close_conn(self: &Arc<Self>, name: &str) -> Result<()> {
-        if let Err(e) = self.write(name, Message::CloseMessage(name.to_string(), None)) {
-            return Err(e);
-        }
+        self.write(name, Message::CloseMessage(name.to_string(), None))?;
         self.conn.get_mut(name).unwrap().shutdown();
         Ok(())
     }
@@ -161,14 +159,14 @@ impl Manager {
 
     pub async fn reconnect(self: &Arc<Self>, name: &str) -> Result<()> {
         if !self.conn.contains_key(name) {
-            return Err(anyhow!(ManagerError::ConnectionUnknown(name.to_string())));
+            return Err(anyhow!(ManagerError::Unknown(name.to_string())));
         }
 
         let conn = self.conn.get(name).expect("Connection should exist");
         let config = conn.config.clone();
 
         if let ConnectionState::Connecting = conn.connection_state {
-            return Err(anyhow!(ManagerError::ConnectionRestarting(
+            return Err(anyhow!(ManagerError::Restarting(
                 name.to_string()
             )));
         }
@@ -202,13 +200,13 @@ impl Manager {
             if let Ok(msg) = global_recv.recv().await {
                 match msg {
                     Message::ReadError(conn_name, _err_str) => {
-                        let _ = self.reconnect(&conn_name);
+                        let _ = self.reconnect(&conn_name).await;
                     }
                     Message::WriteError(conn_name, _err_str) => {
-                        let _ = self.reconnect(&conn_name);
+                        let _ = self.reconnect(&conn_name).await;
                     }
                     Message::PongReceiveTimeoutError(conn_name) => {
-                        let _ = self.reconnect(&conn_name);
+                        let _ = self.reconnect(&conn_name).await;
                     }
                     _ => {}
                 }
