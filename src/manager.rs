@@ -1,14 +1,19 @@
 use std::{
     sync::{
-        atomic::{AtomicBool, Ordering}, Arc, OnceLock
-    }, time::Duration
+        Arc, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
 };
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use dashmap::DashMap;
 use tokio::{task::JoinHandle, time::sleep};
 
-use crate::{config::Config, connection::{Connection, ConnectionState}};
+use crate::{
+    config::Config,
+    connection::{Connection, ConnectionState},
+};
 
 #[derive(Clone, Debug)]
 pub enum Message {
@@ -135,11 +140,13 @@ impl Manager {
                 if let Some(mut conn_ref) = manager.conn.get_mut(&name_owned) {
                     match conn_ref.try_connection(Arc::clone(&global_send)).await {
                         Ok(_) => {
-                            let _ = global_send.send(Message::SuccessfulHandshake(name_owned.clone()));
+                            let _ =
+                                global_send.send(Message::SuccessfulHandshake(name_owned.clone()));
                             break;
-                        },
+                        }
                         Err(_e) => {
-                            let _ = global_send.send(Message::FailedHandshake(name_owned.clone(), attempt));
+                            let _ = global_send
+                                .send(Message::FailedHandshake(name_owned.clone(), attempt));
                             attempt += 1;
                             tokio::time::sleep(Duration::from_secs(back_off as u64)).await;
                         }
@@ -158,10 +165,12 @@ impl Manager {
         }
 
         let conn = self.conn.get(name).expect("Connection should exist");
-        let config = conn.config.clone(); 
+        let config = conn.config.clone();
 
         if let ConnectionState::Connecting = conn.connection_state {
-            return Err(anyhow!(ManagerError::ConnectionRestarting(name.to_string())));
+            return Err(anyhow!(ManagerError::ConnectionRestarting(
+                name.to_string()
+            )));
         }
         drop(conn);
 
