@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use kharbranth::{Config, Manager, Message};
-use log::info;
+use log::{error, info};
 use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
 
@@ -49,29 +49,41 @@ async fn main() -> Result<()> {
         reconnect_timeout: 5,
     };
 
-    manager.new_conn("hyperliquid", config).await;
-
     let mut read_channel = manager.read();
     tokio::spawn(async move {
-        while let Ok(msg) = read_channel.recv().await {
-            info!("Received message: {:?}", msg);
+        loop {
+            match read_channel.recv().await {
+                Ok(msg) => {
+                    info!("Received message: {:?}", msg);
+                }
+                Err(e) => {
+                    error!("Read channel error: {:?}", e);
+                }
+            }
         }
     });
 
-    sleep(Duration::from_secs(2)).await;
-    let subscription_msg = Message::TextMessage("hyperliquid".to_string(), subscribe_json);
-    manager.write("hyperliquid", subscription_msg.clone());
+    manager.new_conn("hyperliquid", config);
 
-    sleep(Duration::from_secs(5)).await;
+    sleep(Duration::from_secs(2)).await;
+    let subscription_msg = Message::TextMessage("hyperliquid".to_string(), subscribe_json.clone());
+    let write_resp = manager.write("hyperliquid", subscription_msg.clone());
+    info!("Write resp: {:?}", write_resp);
+
+    sleep(Duration::from_secs(10)).await;
 
     info!("Trigger reconnect");
-    let _ = manager.reconnect("hyperliquid").await;
-    manager.write("hyperliquid", subscription_msg);
+    manager.reconnect("hyperliquid").await?;
 
-    sleep(Duration::from_secs(20)).await;
+    sleep(Duration::from_secs(10)).await;
+    info!("Resubscription");
+    let write_resp = manager.write("hyperliquid", subscription_msg.clone());
+    info!("Write resp: {:?}", write_resp);
+
+    sleep(Duration::from_secs(30)).await;
 
     info!("Closing connection...");
-    manager.close_conn("hyperliquid").await;
+    manager.close_conn("hyperliquid")?;
 
     Ok(())
 }

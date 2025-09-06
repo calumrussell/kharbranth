@@ -17,6 +17,7 @@ use crate::{config::Config, manager::Message};
 #[derive(Debug)]
 pub enum ConnectionError {
     ConnectionInitFailed(String),
+    ConnectionInactive,
 }
 
 impl std::fmt::Display for ConnectionError {
@@ -24,6 +25,9 @@ impl std::fmt::Display for ConnectionError {
         match self {
             ConnectionError::ConnectionInitFailed(msg) => {
                 write!(f, "Connection initialization failed: {:?}", msg)
+            }
+            ConnectionError::ConnectionInactive => {
+                write!(f, "Called interactive function on inactive connection")
             }
         }
     }
@@ -64,24 +68,36 @@ impl ReadActor {
                             match msg {
                                 TungsteniteMessage::Ping(data) => {
                                     let text = String::from_utf8_lossy(&data).to_string();
-                                    let _ = self.send.send(Message::PingMessage(self.name.clone(), text));
+                                    if let Err(e) = self.send.send(Message::PingMessage(self.name.clone(), text)) {
+                                        error!("Reader Global Send Error: {:?} {:?}", self.name.to_string(), e);
+                                    }
                                 },
                                 TungsteniteMessage::Pong(data) => {
                                     let text = String::from_utf8_lossy(&data).to_string();
-                                    let _ = self.send.send(Message::PongMessage(self.name.clone(), text));
+                                    if let Err(e) = self.send.send(Message::PongMessage(self.name.clone(), text)) {
+                                        error!("Reader Global Send Error: {:?} {:?}", self.name.to_string(), e);
+                                    }
                                 },
                                 TungsteniteMessage::Text(text) => {
-                                    let _ = self.send.send(Message::TextMessage(self.name.clone(), text.to_string()));
+                                    if let Err(e) = self.send.send(Message::TextMessage(self.name.clone(), text.to_string())) {
+                                        error!("Reader Global Send Error: {:?} {:?}", self.name.to_string(), e);
+                                    }
                                 },
                                 TungsteniteMessage::Binary(data) => {
-                                    let _ = self.send.send(Message::BinaryMessage(self.name.clone(), data.to_vec()));
+                                    if let Err(e) = self.send.send(Message::BinaryMessage(self.name.clone(), data.to_vec())) {
+                                        error!("Reader Global Send Error: {:?} {:?}", self.name.to_string(), e);
+                                    }
                                 },
                                 TungsteniteMessage::Close(close_frame) => {
                                     let reason = close_frame.map(|f| f.reason.to_string());
-                                    let _ = self.send.send(Message::CloseMessage(self.name.clone(), reason));
+                                    if let Err(e) = self.send.send(Message::CloseMessage(self.name.clone(), reason)) {
+                                        error!("Reader Global Send Error: {:?} {:?}", self.name.to_string(), e);
+                                    }
                                 },
                                 TungsteniteMessage::Frame(_frame) => {
-                                    let _ = self.send.send(Message::FrameMessage(self.name.clone(), "Raw frame received".to_string()));
+                                    if let Err(e) = self.send.send(Message::FrameMessage(self.name.clone(), "Raw frame received".to_string())) {
+                                        error!("Reader Global Send Error: {:?} {:?}", self.name.to_string(), e);
+                                    }
                                 }
                             }
                         },
@@ -103,7 +119,7 @@ impl ReadActor {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ReadActorHandle;
 
 pub struct PingActor {
@@ -141,16 +157,17 @@ impl PingActor {
             tokio::select! {
                 _ = ping_duration.tick() => {
                     let ping_text = String::from_utf8_lossy(&ping_msg_bytes).to_string();
-                    let _ = self.writer_send.send(Message::PingMessage(
-                        self.name.clone(),
-                        ping_text
-                    ));
+                    if let Err(e) = self.writer_send.send(Message::PingMessage( self.name.clone(), ping_text)) {
+                        error!("Ping Write Error: {:?} {:?}", self.name, e.to_string());
+                    }
                 },
                 _ = ping_timeout.tick() => {
                     let now = Local::now().timestamp();
                     if let Some(last_pong) = self.last_pong_time {
                         if now - last_pong > self.config.ping_timeout as i64 {
-                            let _ = self.writer_send.send(Message::PongReceiveTimeoutError(self.name.clone()));
+                            if let Err(e) = self.writer_send.send(Message::PongReceiveTimeoutError(self.name.clone())) {
+                                error!("Ping Receive Timeout Error: {:?} {:?}", self.name, e.to_string());
+                            }
                         }
                     }
                 },
@@ -167,7 +184,7 @@ impl PingActor {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PingActorHandle;
 
 impl PingActorHandle {
@@ -247,9 +264,16 @@ impl WriteActor {
 
         if let Err(e) = self.writer.send(tungstenite_msg).await {
             error!("Write Error for {:?}: {:?}", self.name, e.to_string());
-            let _ = self
+            if let Err(e) = self
                 .global_send
-                .send(Message::WriteError(self.name.clone(), e.to_string()));
+                .send(Message::WriteError(self.name.clone(), e.to_string()))
+            {
+                error!(
+                    "Write Error to global send for {:?}: {:?}",
+                    self.name,
+                    e.to_string()
+                );
+            }
         }
     }
 
@@ -272,7 +296,7 @@ impl WriteActor {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct WriteActorHandle {
     pub sender: Arc<tokio::sync::broadcast::Sender<Message>>,
 }
@@ -296,28 +320,54 @@ impl WriteActorHandle {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
+pub enum ConnectionState {
+    Connected,
+    Disconnected,
+    Connecting,
+}
+
+#[derive(Clone, Debug)]
 #[allow(dead_code)]
 pub struct Connection {
     pub name: String,
-    pub writer: WriteActorHandle,
-    pub reader: ReadActorHandle,
-    pub ping: PingActorHandle,
+    pub writer: Option<WriteActorHandle>,
+    pub reader: Option<ReadActorHandle>,
+    pub ping: Option<PingActorHandle>,
     pub config: Config,
-    pub cancel_token: CancellationToken,
+    pub cancel_token: Option<CancellationToken>,
+    pub connection_state: ConnectionState,
 }
 
 impl Connection {
-    pub async fn new(
-        name: &str,
-        config: Config,
+    pub fn shutdown(&mut self) {
+        let cancel_token = std::mem::take(&mut self.cancel_token);
+
+        //Cannot trigger without bugs in this code, so should panic
+        cancel_token.unwrap().cancel();
+        self.writer = None;
+        self.ping = None;
+        self.reader = None;
+        self.connection_state = ConnectionState::Disconnected;
+    }
+
+    pub fn write(&self) -> Result<Arc<tokio::sync::broadcast::Sender<Message>>> {
+        if let Some(writer) = &self.writer {
+            return Ok(Arc::clone(&writer.sender));
+        }
+        Err(anyhow!(ConnectionError::ConnectionInactive))
+    }
+
+    //Reconnection logic responsibility is passed to caller
+    pub async fn try_connection(
+        &mut self,
         global_send: Arc<tokio::sync::broadcast::Sender<Message>>,
-        cancel_token: CancellationToken,
-    ) -> Result<Self> {
-        let request = match config.url.clone().into_client_request() {
+    ) -> Result<()> {
+        self.connection_state = ConnectionState::Connecting;
+        let request = match self.config.url.clone().into_client_request() {
             Ok(req) => req,
             Err(e) => {
-                error!("Invalid WebSocket URL '{}': {}", config.url, e);
+                error!("Invalid WebSocket URL '{}': {}", self.config.url, e);
                 return Err(anyhow!(ConnectionError::ConnectionInitFailed(format!(
                     "Invalid URL: {}",
                     e
@@ -330,41 +380,53 @@ impl Connection {
                 debug!("Handshake response: {:?}", response);
                 let (write_stream, read_stream) = conn.split();
 
+                let cancel_token = CancellationToken::new();
+
                 let writer = WriteActorHandle::new(
-                    name.to_string(),
+                    self.name.to_string(),
                     write_stream,
                     cancel_token.clone(),
                     Arc::clone(&global_send),
                 );
                 let reader = ReadActorHandle::new(
-                    name.to_string(),
+                    self.name.to_string(),
                     read_stream,
                     cancel_token.clone(),
                     Arc::clone(&global_send),
                 );
                 let ping = PingActorHandle::new(
-                    name.to_string(),
-                    config.clone(),
+                    self.name.to_string(),
+                    self.config.clone(),
                     Arc::clone(&writer.sender),
                     Arc::clone(&global_send),
                     cancel_token.clone(),
                 );
 
-                Ok(Self {
-                    name: name.to_string(),
-                    writer,
-                    reader,
-                    ping,
-                    config,
-                    cancel_token,
-                })
+                self.writer = Some(writer);
+                self.ping = Some(ping);
+                self.reader = Some(reader);
+                self.connection_state = ConnectionState::Connected;
+                self.cancel_token = Some(cancel_token);
+                Ok(())
             }
             Err(e) => {
-                error!("Failed to connect to '{}': {}", config.url, e);
+                error!("Failed to connect to '{}': {}", self.config.url, e);
                 Err(anyhow!(ConnectionError::ConnectionInitFailed(
                     e.to_string()
                 )))
             }
+        }
+    }
+
+    pub fn new(name: &str, config: Config) -> Self {
+        Self {
+            name: name.to_string(),
+            config,
+            cancel_token: None,
+            writer: None,
+            ping: None,
+            reader: None,
+            connection_state: ConnectionState::Disconnected,
         }
     }
 }
