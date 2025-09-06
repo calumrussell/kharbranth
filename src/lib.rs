@@ -27,8 +27,8 @@ mod test {
         let manager = Manager::new();
         let config = create_test_config("test", "wss://echo.websocket.org");
 
-        manager.new_conn("test", config).await;
-        manager.close_conn("test").await;
+        manager.new_conn("test", config);
+        let _ = manager.close_conn("test");
     }
 
     #[tokio::test]
@@ -36,7 +36,7 @@ mod test {
         let manager = Manager::new();
 
         let message = Message::TextMessage("nonexistent".to_string(), "test".to_string());
-        manager.write("nonexistent", message);
+        let _ = manager.write("nonexistent", message);
     }
 
     #[tokio::test]
@@ -52,7 +52,7 @@ mod test {
     async fn manager_close_conn_works() {
         let manager = Manager::new();
 
-        manager.close_conn("nonexistent").await;
+        let _ = manager.close_conn("nonexistent");
     }
 
     #[tokio::test]
@@ -102,6 +102,6 @@ mod test {
         assert!(result.is_err());
 
         let error_msg = result.unwrap_err().to_string();
-        assert!(error_msg.contains("Connection 'nonexistent' not found for reconnect"));
+        assert!(error_msg.contains("Connection Unknown"));
     }
 }
